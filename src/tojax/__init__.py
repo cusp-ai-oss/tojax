@@ -1,3 +1,5 @@
+# Copyright 2024-2026 Cusp AI
+# SPDX-License-Identifier: Apache-2.0
 """
 tojax: PyTorch to JAX Model Translation Library
 
@@ -65,3 +67,4 @@ if torch.jit._script.OrderedDictWrapper not in jax._src.tree_util._registry:
 
 
 __all__ = ["tojax", "RNGMode", "ScatterMode"]
+__version__ = "0.1.1"

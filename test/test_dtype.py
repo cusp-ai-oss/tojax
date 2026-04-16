@@ -1,3 +1,5 @@
+# Copyright 2024-2026 Cusp AI
+# SPDX-License-Identifier: Apache-2.0
 """Tests for dtype conversion utilities."""
 
 import jax.numpy as jnp

@@ -1,3 +1,5 @@
+# Copyright 2024-2026 Cusp AI
+# SPDX-License-Identifier: Apache-2.0
 """Random number generation context for tojax-translated functions.
 
 Provides a context manager that feeds JAX PRNG keys to translated PyTorch

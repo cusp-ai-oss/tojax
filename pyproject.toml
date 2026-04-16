@@ -1,11 +1,26 @@
 [project]
 name = "tojax"
-version = "0.1.0"
+version = "0.1.1"
 description = "Effortlessly transform PyTorch functions to JAX"
 readme = "README.md"
+license = "Apache-2.0"
 authors = [
     { name = "Nicholas Gao", email = "nicholas@cusp.ai" },
     { name = "CuspAI OpenSource Team", email = "opensource@cusp.ai" }
+]
+keywords = ["pytorch", "jax", "compilation", "machine-learning", "neural-networks"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Natural Language :: English",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 requires-python = ">=3.12"
 dependencies = [

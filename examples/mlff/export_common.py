@@ -1,3 +1,5 @@
+# Copyright 2024-2026 Cusp AI
+# SPDX-License-Identifier: Apache-2.0
 """Unified export utilities for molecular dynamics models.
 
 Provides a model-independent interface for exporting PyTorch models to JAX,

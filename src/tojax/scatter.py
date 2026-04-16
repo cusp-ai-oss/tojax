@@ -1,3 +1,5 @@
+# Copyright 2024-2026 Cusp AI
+# SPDX-License-Identifier: Apache-2.0
 """Scatter mode configuration for JAX indexed update operations.
 
 JAX's indexed update operations (e.g., ``jax.Array.at[].set()``) accept a ``mode``
