@@ -1,9 +1,10 @@
 [project]
 name = "tojax"
-version = "0.1.1"
+version = "1.0.0"
 description = "Effortlessly transform PyTorch functions to JAX"
 readme = "README.md"
 license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [
     { name = "Nicholas Gao", email = "nicholas@cusp.ai" },
     { name = "CuspAI OpenSource Team", email = "opensource@cusp.ai" }
@@ -31,6 +32,10 @@ dependencies = [
     "torch>=2.0.0; python_version < '3.14'",
     "torch>=2.10.0; python_version >= '3.14'",
 ]
+[project.urls]
+Homepage = "https://github.com/cusp-ai-oss/tojax"
+Repository = "https://github.com/cusp-ai-oss/tojax"
+Issues = "https://github.com/cusp-ai-oss/tojax/issues"
 
 [build-system]
 requires = ["hatchling"]
