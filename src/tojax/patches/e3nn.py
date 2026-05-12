@@ -139,7 +139,18 @@ try:
         Returns:
             Patched module with JAX-compatible computation graphs
         """
-        module._compiled_main_left_right = PatchModule(
+        # The fresh codegen produces w3j buffers in float32. If the parent
+        # module was previously cast (e.g. via .double()), inherit that dtype
+        # so internal constants match the input tensors at runtime.
+        orig_float_dtype = next(
+            (
+                b.dtype
+                for b in module._compiled_main_left_right.buffers()
+                if b.is_floating_point()
+            ),
+            None,
+        )
+        new_left_right = PatchModule(
             e3nn.o3._tensor_product._codegen.codegen_tensor_product_left_right(
                 module.irreps_in1,
                 module.irreps_in2,
@@ -150,7 +161,7 @@ try:
                 module._optimize_einsums,
             )
         )
-        module._compiled_main_right = PatchModule(
+        new_right = PatchModule(
             e3nn.o3._tensor_product._codegen.codegen_tensor_product_right(
                 module.irreps_in1,
                 module.irreps_in2,
@@ -161,6 +172,11 @@ try:
                 module._optimize_einsums,
             )
         )
+        if orig_float_dtype is not None:
+            new_left_right = new_left_right.to(dtype=orig_float_dtype)
+            new_right = new_right.to(dtype=orig_float_dtype)
+        module._compiled_main_left_right = new_left_right
+        module._compiled_main_right = new_right
         return module
 
 except ImportError:

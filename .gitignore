@@ -19,7 +19,7 @@ site/
 !examples/notebooks/*.ipynb
 !notebooks/*.ipynb
 !notebooks/examples/*.ipynb
-
+examples/mlff/models
 # uv
 .venv/
 

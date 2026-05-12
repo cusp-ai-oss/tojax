@@ -17,17 +17,17 @@ Three models are supported:
 Each script is self-contained. Use `--help` for a full list of options:
 
 ```bash
-uv run python export_mace.py --help
-uv run python export_orb.py --help
-uv run python export_uma.py --help
+uv run export_mace.py --help
+uv run export_orb.py --help
+uv run export_uma.py --help
 ```
-uv run python export_mace.py --symbolic NSE --platform cuda --f64 --fn ~/platform/projects/kups_sim/medium-mpa-0.model
+
 ### MACE
 
 The MACE checkpoint is downloaded automatically from GitHub:
 
 ```bash
-uv run python export_mace.py --output mace.zip --symbolic NSE
+uv run export_mace.py --output mace.zip --symbolic NSE
 ```
 
 Use `--url` to point at a different checkpoint, `--cache` to change the
@@ -38,7 +38,7 @@ download directory, or `--f64` for double precision.
 Orb weights are fetched automatically by the `orb_models` package:
 
 ```bash
-uv run python export_orb.py --output orb.zip --symbolic NSE
+uv run export_orb.py --output orb.zip --symbolic NSE
 ```
 
 Use `--model-name` to select a different pretrained variant and `--precision`
@@ -51,7 +51,7 @@ UMA checkpoints must be downloaded manually from
 `--checkpoint`:
 
 ```bash
-uv run python export_uma.py --checkpoint /path/to/uma.pt --output uma.zip --symbolic NSE
+uv run export_uma.py --checkpoint /path/to/uma.pt --output uma.zip --symbolic NSE
 ```
 
 UMA-specific flags include `--dataset` (inference head selection),
@@ -77,10 +77,10 @@ Combine freely — `--symbolic NSE` makes all three variable:
 
 ```bash
 # Concrete: locked to 256 atoms, 1 system, 6400 edges
-uv run python export_mace.py --output mace_fixed.zip
+uv run export_mace.py --output mace_fixed.zip
 
 # Polymorphic: any size at runtime
-uv run python export_mace.py --output mace_flex.zip --symbolic NSE
+uv run export_mace.py --output mace_flex.zip --symbolic NSE
 ```
 
 For production use, **always export with `--symbolic NSE`** unless you have a
