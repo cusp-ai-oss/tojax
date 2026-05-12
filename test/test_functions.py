@@ -1782,6 +1782,72 @@ class TestTensorManipulation:
             npt.assert_array_equal(np.asarray(r), e)
 
 
+class TestConcat:
+    """Test torch.cat / torch.concat / torch.concatenate translations."""
+
+    @pytest.mark.parametrize("fn", [torch.cat, torch.concat, torch.concatenate])
+    def test_alias_default_dim(self, fn):
+        a = torch.randn(2, 3)
+        b = torch.randn(4, 3)
+        expected = fn((a, b)).numpy()
+        result = np.asarray(tojax(lambda x, y: fn((x, y)))(a, b))
+        npt.assert_allclose(result, expected)
+
+    @pytest.mark.parametrize("fn", [torch.cat, torch.concat, torch.concatenate])
+    def test_alias_dim_kwarg(self, fn):
+        a = torch.randn(2, 3)
+        b = torch.randn(2, 5)
+        expected = fn((a, b), dim=1).numpy()
+        result = np.asarray(tojax(lambda x, y: fn((x, y), dim=1))(x=a, y=b))
+        npt.assert_allclose(result, expected)
+
+    def test_cat_positional_dim(self):
+        a = torch.randn(2, 3)
+        b = torch.randn(2, 5)
+        expected = torch.cat((a, b), 1).numpy()
+        result = np.asarray(tojax(lambda x, y: torch.cat((x, y), 1))(a, b))
+        npt.assert_allclose(result, expected)
+
+    def test_cat_negative_dim(self):
+        a = torch.randn(2, 3, 4)
+        b = torch.randn(2, 3, 7)
+        expected = torch.cat((a, b), dim=-1).numpy()
+        result = np.asarray(tojax(lambda x, y: torch.cat((x, y), dim=-1))(a, b))
+        npt.assert_allclose(result, expected)
+
+    def test_cat_three_inputs(self):
+        a, b, c = torch.randn(1, 3), torch.randn(2, 3), torch.randn(4, 3)
+        expected = torch.cat((a, b, c)).numpy()
+        result = np.asarray(tojax(lambda *xs: torch.cat(xs))(a, b, c))
+        npt.assert_allclose(result, expected)
+
+    def test_cat_with_out(self):
+        a = torch.randn(2, 3, dtype=torch.float64)
+        b = torch.randn(4, 3, dtype=torch.float64)
+        expected = torch.cat((a, b)).clone()
+
+        def cat_with_out(x, y, out_tensor):
+            torch.cat((x, y), out=out_tensor)
+            return out_tensor
+
+        jax_out = torch.zeros(6, 3, dtype=torch.float64)
+        jax_out = tojax(cat_with_out)(a.clone(), b.clone(), jax_out)
+        npt.assert_allclose(np.asarray(jax_out), expected.numpy(), rtol=1e-5, atol=1e-5)
+
+    def test_concatenate_with_out_and_dim(self):
+        a = torch.randn(2, 3, dtype=torch.float64)
+        b = torch.randn(2, 5, dtype=torch.float64)
+        expected = torch.concatenate((a, b), dim=1).clone()
+
+        def concat_with_out(x, y, out_tensor):
+            torch.concatenate((x, y), dim=1, out=out_tensor)
+            return out_tensor
+
+        jax_out = torch.zeros(2, 8, dtype=torch.float64)
+        jax_out = tojax(concat_with_out)(a.clone(), b.clone(), jax_out)
+        npt.assert_allclose(np.asarray(jax_out), expected.numpy(), rtol=1e-5, atol=1e-5)
+
+
 class TestGather:
     """Test torch.gather."""
 
