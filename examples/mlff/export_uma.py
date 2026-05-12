@@ -276,7 +276,11 @@ def main() -> None:
         "--min-edges-per-system",
         type=int,
         default=None,
-        help="Segmented matmul block size.",
+        help=(
+            "Segmented matmul block size. Higher values are more efficient, so "
+            "pick as large as possible; if set larger than the minimum number "
+            "of edges per system at runtime, results will be incorrect."
+        ),
     )
     parser.add_argument(
         "--merge-mole", action="store_true", help="Enable MOLE merging."
@@ -288,6 +292,10 @@ def main() -> None:
         args.output = Path(f"{Path(args.checkpoint).stem}_{args.dataset}.zip")
 
     mss = args.min_edges_per_system
+    if "S" in args.symbolic.upper() and mss is None:
+        raise ValueError(
+            "--min-edges-per-system must be specified when S is a symbolic dim."
+        )
     patch_ragged_dot(multi_system=args.multi_system, min_edges_per_system=mss)
     torch.set_default_device(args.device)
 
