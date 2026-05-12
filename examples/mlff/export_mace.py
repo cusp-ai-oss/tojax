@@ -146,6 +146,10 @@ def main():
         default="https://github.com/ACEsuit/mace-foundations/releases/download/mace_mpa_0/mace-mpa-0-medium.model",
         help="URL to download MACE model from",
     )
+    parser.add_argument(
+        "--fn", type=str, default=None,
+        help="filename to a local copy of the target MACE model",
+    )
     parser.add_argument("--cache", type=str, default=None, help="Cache path.")
     parser.add_argument("--f64", action="store_true", help="64-bit precision.")
     parser.add_argument(
@@ -153,18 +157,22 @@ def main():
     )
     args = parser.parse_args()
 
-    if args.clear_cache:
-        import shutil
+    if args.fn is None:
+        if args.clear_cache:
+            import shutil
 
-        cache_dir = get_cache_dir()
-        if cache_dir.exists():
-            shutil.rmtree(cache_dir)
-            print(f"Cleared cache: {cache_dir}")
-        return
+            cache_dir = get_cache_dir()
+            if cache_dir.exists():
+                shutil.rmtree(cache_dir)
+                print(f"Cleared cache: {cache_dir}")
+            return
 
-    model_path = download_mace_model(
-        args.url, pathlib.Path(args.cache) if args.cache else None
-    )
+        model_path = download_mace_model(
+            args.url, pathlib.Path(args.cache) if args.cache else None
+        )
+    else:
+        model_path = pathlib.Path(args.fn)
+        
     if args.output is None:
         suffix = "_64" if args.f64 else "_32"
         args.output = Path(f"{model_path.stem}{suffix}.zip")
