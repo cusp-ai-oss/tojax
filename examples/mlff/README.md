@@ -4,13 +4,14 @@ Export PyTorch machine learning force field (MLFF) models to JAX using `tojax`.
 The exported models separate parameters from the computation graph and package
 everything into a single `.zip` file for deployment.
 
-Three models are supported:
+Four models are supported:
 
 | Model | Script | Download |
 |-------|--------|----------|
 | [MACE](https://github.com/ACEsuit/mace) | `export_mace.py` | Automatic (cached in `~/.cache/tojax/models/`) |
 | [Orb](https://github.com/orbital-materials/orb-models) | `export_orb.py` | Automatic (via `orb_models` package) |
 | [UMA](https://github.com/FAIR-Chem/fairchem) | `export_uma.py` | **Manual** — download checkpoints from [Hugging Face](https://huggingface.co/facebook/uma) |
+| [MatterSim](https://github.com/microsoft/mattersim) | `export_mattersim.py` | Automatic (cached in `~/.local/mattersim/pretrained_models/`) |
 
 ## Quick Start
 
@@ -20,6 +21,7 @@ Each script is self-contained. Use `--help` for a full list of options:
 uv run export_mace.py --help
 uv run export_orb.py --help
 uv run export_uma.py --help
+uv run export_mattersim.py --help
 ```
 
 ### MACE
@@ -56,6 +58,25 @@ uv run export_uma.py --checkpoint /path/to/uma.pt --output uma.zip --symbolic NS
 
 UMA-specific flags include `--dataset` (inference head selection),
 `--multi-system` (per-system weight matrices), and `--min-edges-per-system`.
+
+### MatterSim
+
+MatterSim (M3GNet) checkpoints are downloaded automatically by the
+`mattersim` package on first use:
+
+```bash
+uv run export_mattersim.py --output mattersim.zip --symbolic NSE
+```
+
+Use `--checkpoint` to pick between `mattersim-v1.0.0-1m` (default, faster)
+and `mattersim-v1.0.0-5m` (larger, more accurate), or to point at a local
+`.pth` file. The adapter sorts edges by central atom (M3GNet's
+three-body convention) and reconstructs the three-body indices densely
+with a static cap controlled by `--max-neighbors-per-atom` (default 100);
+runtime structures whose maximum bonds-per-atom exceeds this value will
+silently drop the excess neighbours, so pick comfortably above the true
+maximum. `M3Gnet.forward` is monkey-patched at runtime to apply a
+padding mask, so no mattersim fork is required.
 
 ## Symbolic Shapes (`--symbolic`)
 
