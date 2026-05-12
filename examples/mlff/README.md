@@ -57,7 +57,10 @@ uv run export_uma.py --checkpoint /path/to/uma.pt --output uma.zip --symbolic NS
 ```
 
 UMA-specific flags include `--dataset` (inference head selection),
-`--multi-system` (per-system weight matrices), and `--min-edges-per-system`.
+`--cutoff`, `--merge-mole` (collapse MOLE experts into a single weight set;
+assumes all atoms share the same gating), `--min-edges-per-system`
+(segmented-matmul block size, required when `--merge-mole` is unset and
+either `S` is symbolic or `--n-batches >= 2`), and `--no-tf32`.
 
 ### MatterSim
 
@@ -72,11 +75,13 @@ Use `--checkpoint` to pick between `mattersim-v1.0.0-1m` (default, faster)
 and `mattersim-v1.0.0-5m` (larger, more accurate), or to point at a local
 `.pth` file. The adapter sorts edges by central atom (M3GNet's
 three-body convention) and reconstructs the three-body indices densely
-with a static cap controlled by `--max-neighbors-per-atom` (default 100);
-runtime structures whose maximum bonds-per-atom exceeds this value will
-silently drop the excess neighbours, so pick comfortably above the true
-maximum. `M3Gnet.forward` is monkey-patched at runtime to apply a
-padding mask, so no mattersim fork is required.
+with a static cap. By default the cap is derived in the forward pass
+from the tensor dimensions as `1.5 * (E/N) * (r_3b/r_cut)^3`; override
+it via `--max-neighbors-per-atom` for surfaces, defects, or other
+non-uniform structures where the true max exceeds the bulk average.
+Runtime structures whose maximum bonds-per-atom exceeds the cap will
+silently drop the excess neighbours. `M3Gnet.forward` is monkey-patched
+at runtime to apply a padding mask, so no mattersim fork is required.
 
 ## Symbolic Shapes (`--symbolic`)
 
@@ -110,7 +115,7 @@ specific reason to fix a dimension (e.g. single-system simulations where
 
 ## Common Options
 
-These flags are shared across all three scripts:
+These flags are shared across all four scripts:
 
 ```
 --output PATH              Output zip file path
