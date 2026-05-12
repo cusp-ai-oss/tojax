@@ -224,21 +224,6 @@ def translate_constructor(torch_fn: Callable, jax_fn: Callable):
     return fn
 
 
-def _jax_cat(x, dim=0, out=None):
-    """
-    JAX implementation of PyTorch's concatenation function.
-
-    Args:
-        x: Sequence of arrays to concatenate
-        dim: Dimension along which to concatenate (default: 0)
-        out: Output parameter (ignored, for PyTorch compatibility)
-
-    Returns:
-        Concatenated array
-    """
-    return jnp.concatenate(x, axis=dim)
-
-
 def get_matmul_precision():
     if not torch.backends.cuda.matmul.allow_tf32:
         return jax.lax.Precision.HIGHEST
@@ -267,8 +252,9 @@ def inherit_precision(fn: Callable):
 # =============================================================================
 # Direct mappings between PyTorch and JAX functions
 
-translates(torch.concatenate, _jax_cat)
-translates(torch.cat, _jax_cat)
+translates(torch.concatenate, translate_kwargs(jnp.concatenate))
+translates(torch.concat, translate_kwargs(jnp.concatenate))
+translates(torch.cat, translate_kwargs(jnp.concatenate))
 translates(torch._assert, lambda condition, message: None)
 
 # Tensor constructors
