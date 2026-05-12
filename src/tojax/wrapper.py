@@ -639,6 +639,21 @@ class TensorWrapper(TojaxDispatchable):
             return 0.0 + 0.0j
         return self.data.item()
 
+    def repeat(self, *sizes):
+        if (
+            len(sizes) == 1
+            and not isinstance(sizes[0], int)
+            and not export.is_symbolic_dim(sizes[0])
+        ):
+            sizes = sizes[0]
+        sizes = unwrap(tuple(sizes))
+        if len(sizes) < self.data.ndim:
+            raise RuntimeError(
+                "Number of dimensions of repeat dims can not be smaller than "
+                "number of dimensions of tensor"
+            )
+        return TensorWrapper(jnp.tile(self.data, sizes))
+
 
 def to_jax_compatible(x):
     from tojax.mode import to_jax_compatible as _to_jax_compatible
