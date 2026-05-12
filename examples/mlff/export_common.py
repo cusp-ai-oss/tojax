@@ -108,19 +108,19 @@ def make_abstract_input(
     )
 
 
-def make_dummy_data(n_atoms: int, n_batches: int, n_edges: int) -> AtomGraphInput:
+def make_dummy_data(n_atoms: int, n_batches: int, n_edges: int, dtype:torch.dtype) -> AtomGraphInput:
     """Create random dummy input data matching ``AtomGraphInput``."""
     natoms_per = [n_atoms // n_batches] * n_batches
     for i in range(n_atoms % n_batches):
         natoms_per[i] += 1
     natoms_t = torch.tensor(natoms_per)
     return AtomGraphInput(
-        pos=torch.randn(n_atoms, 3, dtype=torch.float32),
+        pos=torch.randn(n_atoms, 3, dtype=dtype),
         atomic_numbers=torch.randint(1, 10, (n_atoms,)),
-        cell=torch.eye(3, dtype=torch.float32).unsqueeze(0).repeat(n_batches, 1, 1),
+        cell=torch.eye(3, dtype=dtype).unsqueeze(0).repeat(n_batches, 1, 1),
         pbc=torch.ones(n_batches, 3, dtype=torch.bool),
         edge_index=torch.randint(0, n_atoms, (2, n_edges)),
-        cell_offsets=torch.randn(n_edges, 3, dtype=torch.float32),
+        cell_offsets=torch.randn(n_edges, 3, dtype=dtype),
         batch=torch.arange(n_batches).repeat_interleave(natoms_t),
         charge=torch.zeros(n_batches, dtype=torch.long),
         spin=torch.zeros(n_batches, dtype=torch.long),
@@ -369,7 +369,11 @@ def run_export(
         constraints: Symbolic shape constraints, e.g. ``("E >= 64",)``.
     """
     torch.manual_seed(args.seed)
-    data = make_dummy_data(args.n_atoms, args.n_batches, args.n_edges)
+    dtype = torch.float32
+    if hasattr(args, 'f64'):
+        if args.f64:
+            dtype = torch.float64
+    data = make_dummy_data(args.n_atoms, args.n_batches, args.n_edges, dtype)
 
     # Probe the function to determine if it returns a dict or a tensor
     probe_out = fn(data)

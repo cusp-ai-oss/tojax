@@ -21,7 +21,7 @@ uv run python export_mace.py --help
 uv run python export_orb.py --help
 uv run python export_uma.py --help
 ```
-
+uv run python export_mace.py --symbolic NSE --platform cuda --f64 --fn ~/platform/projects/kups_sim/medium-mpa-0.model
 ### MACE
 
 The MACE checkpoint is downloaded automatically from GitHub:
