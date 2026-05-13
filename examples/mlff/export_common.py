@@ -78,6 +78,7 @@ def make_abstract_input(
     *,
     symbolic: str = "",
     constraints: tuple[str, ...] = (),
+    float_dtype: jnp.dtype = jnp.float32,
 ) -> dict:
     """Create abstract input with symbolic shapes for JAX export.
 
@@ -88,6 +89,8 @@ def make_abstract_input(
         symbolic: Letters indicating which dims are symbolic:
             N=atoms, S=systems, E=edges (e.g. "NSE" for all).
         constraints: Export constraints, e.g. ("E >= 64",).
+        float_dtype: Dtype to use for floating-point fields (pos, cell,
+            cell_offsets). Defaults to float32.
     """
     sym = symbolic.upper()
     sym_dims = []
@@ -96,31 +99,33 @@ def make_abstract_input(
     shapes = export.symbolic_shape(", ".join(sym_dims), constraints=constraints)
     N, B, E = shapes
     return dict(
-        pos=jax.ShapeDtypeStruct((N, 3), jnp.float32),
+        pos=jax.ShapeDtypeStruct((N, 3), float_dtype),
         atomic_numbers=jax.ShapeDtypeStruct((N,), jnp.int64),
-        cell=jax.ShapeDtypeStruct((B, 3, 3), jnp.float32),
+        cell=jax.ShapeDtypeStruct((B, 3, 3), float_dtype),
         pbc=jax.ShapeDtypeStruct((B, 3), jnp.bool_),
         edge_index=jax.ShapeDtypeStruct((2, E), jnp.int64),
-        cell_offsets=jax.ShapeDtypeStruct((E, 3), jnp.float32),
+        cell_offsets=jax.ShapeDtypeStruct((E, 3), float_dtype),
         batch=jax.ShapeDtypeStruct((N,), jnp.int64),
         charge=jax.ShapeDtypeStruct((B,), jnp.int64),
         spin=jax.ShapeDtypeStruct((B,), jnp.int64),
     )
 
 
-def make_dummy_data(n_atoms: int, n_batches: int, n_edges: int) -> AtomGraphInput:
+def make_dummy_data(
+    n_atoms: int, n_batches: int, n_edges: int, dtype: torch.dtype
+) -> AtomGraphInput:
     """Create random dummy input data matching ``AtomGraphInput``."""
     natoms_per = [n_atoms // n_batches] * n_batches
     for i in range(n_atoms % n_batches):
         natoms_per[i] += 1
     natoms_t = torch.tensor(natoms_per)
     return AtomGraphInput(
-        pos=torch.randn(n_atoms, 3, dtype=torch.float32),
+        pos=torch.randn(n_atoms, 3, dtype=dtype),
         atomic_numbers=torch.randint(1, 10, (n_atoms,)),
-        cell=torch.eye(3, dtype=torch.float32).unsqueeze(0).repeat(n_batches, 1, 1),
+        cell=torch.eye(3, dtype=dtype).unsqueeze(0).repeat(n_batches, 1, 1),
         pbc=torch.ones(n_batches, 3, dtype=torch.bool),
         edge_index=torch.randint(0, n_atoms, (2, n_edges)),
-        cell_offsets=torch.randn(n_edges, 3, dtype=torch.float32),
+        cell_offsets=torch.randn(n_edges, 3, dtype=dtype),
         batch=torch.arange(n_batches).repeat_interleave(natoms_t),
         charge=torch.zeros(n_batches, dtype=torch.long),
         spin=torch.zeros(n_batches, dtype=torch.long),
@@ -369,7 +374,10 @@ def run_export(
         constraints: Symbolic shape constraints, e.g. ``("E >= 64",)``.
     """
     torch.manual_seed(args.seed)
-    data = make_dummy_data(args.n_atoms, args.n_batches, args.n_edges)
+    f64 = bool(getattr(args, "f64", False))
+    dtype = torch.float64 if f64 else torch.float32
+    float_dtype = jnp.float64 if f64 else jnp.float32
+    data = make_dummy_data(args.n_atoms, args.n_batches, args.n_edges, dtype)
 
     # Probe the function to determine if it returns a dict or a tensor
     probe_out = fn(data)
@@ -397,6 +405,7 @@ def run_export(
         args.n_edges,
         symbolic=args.symbolic,
         constraints=constraints,
+        float_dtype=float_dtype,
     )
     print("Exporting model...")
     parameters, exported = export_model(
