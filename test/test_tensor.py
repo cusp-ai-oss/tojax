@@ -565,3 +565,32 @@ class TestForwardOperators:
 
     def test_invert(self, bool_a):
         self._check(lambda a: ~a, bool_a, expected=~bool_a)
+
+
+class TestRepeat:
+    """Test TensorWrapper.repeat against torch.Tensor.repeat."""
+
+    def _check(self, func, *tensors, expected):
+        result = tojax(func)(*tensors)
+        npt.assert_array_equal(np.asarray(result), expected.numpy())
+
+    def test_1d_single_dim(self):
+        x = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64)
+        self._check(lambda t: t.repeat(3), x, expected=x.repeat(3))
+
+    def test_1d_unsqueezed(self):
+        x = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64)
+        self._check(lambda t: t.repeat(2, 3), x, expected=x.repeat(2, 3))
+
+    def test_2d(self):
+        x = torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.float64)
+        self._check(lambda t: t.repeat(2, 3), x, expected=x.repeat(2, 3))
+
+    def test_tuple_arg(self):
+        x = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64)
+        self._check(lambda t: t.repeat((2, 3)), x, expected=x.repeat((2, 3)))
+
+    def test_fewer_dims_raises(self):
+        x = torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.float64)
+        with pytest.raises(RuntimeError):
+            tojax(lambda t: t.repeat(2))(x)
