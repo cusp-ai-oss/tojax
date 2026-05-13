@@ -178,22 +178,22 @@ segmented_matmul_blocked = jax.jit(
 )  # type: ignore
 
 
-def patch_ragged_dot(
-    multi_system: bool, min_edges_per_system: int | None = None
-) -> None:
-    """Monkey-patch MOLE.ragged_dot with a segmented_matmul_blocked version."""
-    if multi_system and min_edges_per_system is None:
-        raise ValueError("min_edges_per_system must be set when multi_system is True")
+def patch_ragged_dot(min_edges_per_system: int | None = None) -> None:
+    """Monkey-patch MOLE.ragged_dot.
+
+    If ``min_edges_per_system`` is None, all systems are assumed to share a
+    single weight set (``rhs[0]``). Otherwise, segmented matmul is used with
+    the given block size to support per-system weights.
+    """
 
     def ragged_dot(self, lhs, rhs, group_sizes):
         if not isinstance(lhs, TensorWrapper):
             return _OG_RAGGED_DOT(self, lhs, rhs, group_sizes)
-        if not multi_system:
+        if min_edges_per_system is None:
             return torch.einsum("...d,ed->...e", lhs, rhs[0])
         lh_in = to_jax_compatible(lhs)
         rh_in = to_jax_compatible(rhs)
         gs_in = to_jax_compatible(group_sizes)
-        assert min_edges_per_system is not None
         N = lh_in.shape[0]
         indices = jnp.arange(gs_in.shape[0]).repeat(gs_in, total_repeat_length=N)
         if lh_in.ndim == 3:
@@ -270,16 +270,20 @@ def main() -> None:
     parser.add_argument("--dataset", default="omat", help="Dataset name.")
     parser.add_argument("--cutoff", type=float, default=6.0, help="Cutoff radius.")
     parser.add_argument(
-        "--multi-system", action="store_true", help="Per-system weight matrices."
-    )
-    parser.add_argument(
         "--min-edges-per-system",
         type=int,
         default=None,
         help=(
-            "Segmented matmul block size. Higher values are more efficient, so "
-            "pick as large as possible; if set larger than the minimum number "
-            "of edges per system at runtime, results will be incorrect."
+            "Segmented matmul block size. Used when --merge-mole is unset "
+            "and either S is symbolic or --n-batches >= 2 (per-system MOLE "
+            "weights). Higher values are more efficient, so pick as large "
+            "as possible; if set larger than the minimum number of edges "
+            "per system at runtime, results will be incorrect. If unset "
+            "in the multi-system case (and --merge-mole is also unset), "
+            "the first system's MOLE weights are used for all systems; "
+            "results are only correct when all systems share MOLE gating "
+            "(e.g. same composition / charge / spin; positions, cells, "
+            "and random seeds may differ)."
         ),
     )
     parser.add_argument(
@@ -292,11 +296,43 @@ def main() -> None:
         args.output = Path(f"{Path(args.checkpoint).stem}_{args.dataset}.zip")
 
     mss = args.min_edges_per_system
-    if "S" in args.symbolic.upper() and mss is None:
-        raise ValueError(
-            "--min-edges-per-system must be specified when S is a symbolic dim."
+    s_dynamic = "S" in args.symbolic.upper()
+    multi_systems_possible = s_dynamic or args.n_batches >= 2
+    shape_desc = "S is symbolic" if s_dynamic else f"--n-batches={args.n_batches}"
+
+    # --merge-mole collapses MOLE experts into a single weight set, which is
+    # only valid when all atoms share the same MOLE gating (e.g. a single
+    # system, or homogeneous compositions). Warn if the export admits more.
+    if args.merge_mole and multi_systems_possible:
+        logging.warning(
+            "--merge-mole assumes all systems are the same kind, but %s. "
+            "Results will be incorrect for batches with heterogeneous "
+            "compositions at runtime.",
+            shape_desc,
         )
-    patch_ragged_dot(multi_system=args.multi_system, min_edges_per_system=mss)
+
+    # Per-system weights are handled by segmented matmul (when mss is set) or
+    # by falling back to the first system's weights (when mss is unset, on the
+    # user's word that all systems share MOLE gating).
+    needs_segmented = not args.merge_mole and multi_systems_possible and mss is not None
+
+    if not args.merge_mole and multi_systems_possible and mss is None:
+        logging.warning(
+            "Neither --merge-mole nor --min-edges-per-system is set, but %s. "
+            "MOLE will use the first system's weights for all systems; "
+            "results will be incorrect at runtime unless all systems share "
+            "MOLE gating (same composition / charge / spin; positions, "
+            "cells, and random seeds may differ).",
+            shape_desc,
+        )
+    if mss is not None and not needs_segmented:
+        logging.warning(
+            "--min-edges-per-system is ignored: segmented matmul is not "
+            "used (either --merge-mole is set, or the export is for a "
+            "single system with concrete shape)."
+        )
+
+    patch_ragged_dot(min_edges_per_system=mss if needs_segmented else None)
     torch.set_default_device(args.device)
 
     predictor = load_predict_unit(
