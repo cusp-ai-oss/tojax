@@ -185,7 +185,7 @@ def main():
         args,
         metadata=dict(
             cutoff=float(torch_model.r_max),  # type: ignore[arg-type]
-            atomic_numbers=np.asarray(torch_model.atomic_numbers).tolist(),  # type: ignore[arg-type]
+            atomic_numbers=np.asarray(torch_model.atomic_numbers.cpu()).tolist(),  # type: ignore[arg-type]
         ),
     )
     print("\nMACE model successfully exported!")
