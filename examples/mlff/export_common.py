@@ -111,7 +111,9 @@ def make_abstract_input(
     )
 
 
-def make_dummy_data(n_atoms: int, n_batches: int, n_edges: int, dtype:torch.dtype) -> AtomGraphInput:
+def make_dummy_data(
+    n_atoms: int, n_batches: int, n_edges: int, dtype: torch.dtype
+) -> AtomGraphInput:
     """Create random dummy input data matching ``AtomGraphInput``."""
     natoms_per = [n_atoms // n_batches] * n_batches
     for i in range(n_atoms % n_batches):

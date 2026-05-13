@@ -147,7 +147,9 @@ def main():
         help="URL to download MACE model from",
     )
     parser.add_argument(
-        "--fn", type=str, default=None,
+        "--fn",
+        type=str,
+        default=None,
         help="filename to a local copy of the target MACE model",
     )
     parser.add_argument("--cache", type=str, default=None, help="Cache path.")
@@ -172,7 +174,7 @@ def main():
         )
     else:
         model_path = pathlib.Path(args.fn)
-        
+
     if args.output is None:
         suffix = "_64" if args.f64 else "_32"
         args.output = Path(f"{model_path.stem}{suffix}.zip")
