@@ -7,6 +7,7 @@ import numpy.testing as npt
 import pytest
 import torch
 import torch.nn as nn
+from jax import export
 from pytest import fixture
 
 from tojax.functions import get_matmul_precision
@@ -2246,3 +2247,171 @@ class TestSqueeze:
         result = np.asarray(tojax(lambda t: torch.squeeze(t, (0, 1)))(x))
         npt.assert_allclose(result, expected)
         assert result.shape == (2, 1, 3, 1)
+
+
+class TestInterpolate:
+    """Test nn.functional.interpolate translation against PyTorch."""
+
+    def _check(self, x, **kwargs):
+        expected = nn.functional.interpolate(x, **kwargs).numpy()
+        result = np.asarray(
+            tojax(lambda t: nn.functional.interpolate(t, **kwargs))(jnp.asarray(x))
+        )
+        assert result.shape == expected.shape
+        npt.assert_allclose(result, expected, rtol=1e-5, atol=1e-5)
+        return result
+
+    @pytest.mark.parametrize("mode", ["nearest", "nearest-exact", "linear", "area"])
+    @pytest.mark.parametrize("size", [2, 3, 5, 9])
+    def test_1d(self, mode, size):
+        self._check(torch.randn(2, 3, 6), size=size, mode=mode)
+
+    @pytest.mark.parametrize("ac", [False, True])
+    @pytest.mark.parametrize("size", [3, 6, 11])
+    def test_1d_linear_align_corners(self, ac, size):
+        self._check(torch.randn(2, 3, 6), size=size, mode="linear", align_corners=ac)
+
+    @pytest.mark.parametrize("mode", ["nearest", "nearest-exact", "area"])
+    @pytest.mark.parametrize("size", [(3, 4), (5, 5), (10, 8)])
+    def test_2d_nonlinear(self, mode, size):
+        self._check(torch.randn(2, 3, 7, 8), size=size, mode=mode)
+
+    @pytest.mark.parametrize("mode", ["bilinear", "bicubic"])
+    @pytest.mark.parametrize("ac", [False, True])
+    @pytest.mark.parametrize("size", [(3, 4), (10, 9)])
+    def test_2d_linear(self, mode, ac, size):
+        self._check(torch.randn(2, 3, 7, 8), size=size, mode=mode, align_corners=ac)
+
+    @pytest.mark.parametrize("mode", ["bilinear", "bicubic"])
+    @pytest.mark.parametrize("ac", [False, True])
+    @pytest.mark.parametrize("size", [3, 5, 13])  # down- and up-sample
+    def test_2d_antialias(self, mode, ac, size):
+        self._check(
+            torch.randn(2, 3, 8, 8),
+            size=(size, size),
+            mode=mode,
+            align_corners=ac,
+            antialias=True,
+        )
+
+    @pytest.mark.parametrize("mode", ["nearest", "trilinear", "area"])
+    def test_3d(self, mode):
+        kw = {"align_corners": False} if mode == "trilinear" else {}
+        self._check(torch.randn(2, 3, 6, 5, 4), size=(4, 5, 8), mode=mode, **kw)
+
+    @pytest.mark.parametrize("recompute", [None, True, False])
+    @pytest.mark.parametrize("sf", [0.5, 1.3, 2.0])
+    def test_scale_factor(self, sf, recompute):
+        self._check(
+            torch.randn(2, 3, 8, 8),
+            scale_factor=sf,
+            mode="bilinear",
+            align_corners=False,
+            recompute_scale_factor=recompute,
+        )
+
+    def test_scale_factor_per_dim(self):
+        self._check(torch.randn(2, 3, 4, 6), scale_factor=(2.0, 0.5), mode="nearest")
+
+    def test_nearest_preserves_integer_dtype(self):
+        x = torch.randint(0, 255, (1, 3, 6, 6), dtype=torch.uint8)
+        expected = nn.functional.interpolate(x, size=(9, 9), mode="nearest").numpy()
+        result = np.asarray(
+            tojax(lambda t: nn.functional.interpolate(t, size=(9, 9), mode="nearest"))(
+                jnp.asarray(x)
+            )
+        )
+        assert result.dtype == expected.dtype
+        npt.assert_array_equal(result, expected)
+
+    def _check_symbolic(self, in_shape, **kwargs):
+        """Export with symbolic spatial dims, run at ``in_shape``, match torch."""
+        sd = len(in_shape) - 2
+        fn = tojax(lambda t: nn.functional.interpolate(t, **kwargs))
+        syms = export.symbolic_shape(",".join(f"d{i}" for i in range(sd)))
+        spec = jax.ShapeDtypeStruct((*in_shape[:2], *syms), jnp.float32)
+        exp = export.export(jax.jit(fn))(spec)
+        x = np.asarray(torch.randn(*in_shape), dtype=np.float32)
+        result = np.asarray(exp.call(jnp.asarray(x)))
+        expected = nn.functional.interpolate(torch.tensor(x), **kwargs).numpy()
+        assert result.shape == expected.shape
+        npt.assert_allclose(result, expected, rtol=1e-4, atol=1e-4)
+
+    @pytest.mark.parametrize(
+        "mode,ac",
+        [
+            ("nearest", None),
+            ("nearest-exact", None),
+            ("linear", False),
+            ("linear", True),
+        ],
+    )
+    @pytest.mark.parametrize("in_size", [5, 6, 11])
+    def test_symbolic_1d(self, mode, ac, in_size):
+        kw = {"align_corners": ac} if ac is not None else {}
+        self._check_symbolic((2, 3, in_size), size=8, mode=mode, **kw)
+
+    @pytest.mark.parametrize(
+        "mode,ac",
+        [
+            ("nearest", None),
+            ("bilinear", False),
+            ("bilinear", True),
+            ("bicubic", False),
+            ("bicubic", True),
+        ],
+    )
+    def test_symbolic_2d_to_fixed(self, mode, ac):
+        kw = {"align_corners": ac} if ac is not None else {}
+        self._check_symbolic((2, 3, 9, 7), size=(8, 8), mode=mode, **kw)
+
+    @pytest.mark.parametrize("sf", [2.0, 3.0])
+    def test_symbolic_integer_scale_factor(self, sf):
+        # sf=3 exercises exact-integer source coords (lambda == 0).
+        self._check_symbolic(
+            (2, 3, 6), scale_factor=sf, mode="linear", align_corners=False
+        )
+
+    def test_symbolic_area_unsupported(self):
+        fn = tojax(lambda t: nn.functional.interpolate(t, size=(4, 4), mode="area"))
+        (d,) = export.symbolic_shape("d")
+        with pytest.raises(NotImplementedError):
+            jax.eval_shape(fn, jax.ShapeDtypeStruct((2, 3, d, 8), jnp.float32))
+
+    def test_symbolic_antialias_unsupported(self):
+        fn = tojax(
+            lambda t: nn.functional.interpolate(
+                t, size=(4, 4), mode="bilinear", align_corners=False, antialias=True
+            )
+        )
+        (d,) = export.symbolic_shape("d")
+        with pytest.raises(NotImplementedError):
+            jax.eval_shape(fn, jax.ShapeDtypeStruct((2, 3, d, 8), jnp.float32))
+
+    def test_symbolic_fractional_scale_factor_unsupported(self):
+        fn = tojax(
+            lambda t: nn.functional.interpolate(
+                t, scale_factor=1.5, mode="linear", align_corners=False
+            )
+        )
+        (d,) = export.symbolic_shape("d")
+        with pytest.raises(NotImplementedError):
+            jax.eval_shape(fn, jax.ShapeDtypeStruct((2, 3, d), jnp.float32))
+
+    def test_invalid_mode(self):
+        with pytest.raises(NotImplementedError):
+            tojax(lambda t: nn.functional.interpolate(t, size=4, mode="cubic"))(
+                jnp.asarray(torch.randn(2, 3, 6))
+            )
+
+    def test_mode_dim_mismatch(self):
+        with pytest.raises(ValueError):
+            tojax(lambda t: nn.functional.interpolate(t, size=(4, 4), mode="linear"))(
+                jnp.asarray(torch.randn(2, 3, 6, 6))
+            )
+
+    def test_size_and_scale_factor_conflict(self):
+        with pytest.raises(ValueError):
+            tojax(lambda t: nn.functional.interpolate(t, size=4, scale_factor=2.0))(
+                jnp.asarray(torch.randn(2, 3, 6))
+            )
