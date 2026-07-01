@@ -488,9 +488,19 @@ class TensorWrapper(TojaxDispatchable):
         if pure_fn_name in self.__dict__:  # hasattr but without recursion
             pure_fn = getattr(self, pure_fn_name)
         elif hasattr(torch, pure_fn_name):
+            torch_fn = getattr(torch, pure_fn_name)
 
             def pure_fn(*args, **kwargs):
-                return getattr(torch, pure_fn_name)(self, *args, **kwargs)
+                from tojax.data import tojax_data
+                from tojax.functions import jax_function
+
+                try:
+                    jax_fn = jax_function(torch_fn)
+                except NotImplementedError:
+                    return torch_fn(self, *args, **kwargs)
+                args_w = wrap(tojax_data((self, *args)))
+                kwargs_w = wrap(tojax_data(kwargs))
+                return jax_fn(*args_w, **kwargs_w)
         else:
             raise AttributeError(
                 f"TensorWrapper has no attribute '{name}' {pure_fn_name} {is_inplace}"
@@ -513,6 +523,14 @@ class TensorWrapper(TojaxDispatchable):
 
     def __bool__(self):
         raise ValueError("Data dependent control flow is not supported!")
+
+    def __iter__(self):
+        # Required for tuple-unpacking patterns like `a, b, c = x.T` that show
+        # up in equivariant libraries. Without an explicit __iter__, Python
+        # falls back to __getitem__-with-IndexError iteration which JAX arrays
+        # don't terminate cleanly under.
+        for i in range(len(self)):
+            yield self[i]
 
     def __getitem__(self, key):
         return TensorWrapper(self.data.__getitem__(to_jax_compatible(key)))

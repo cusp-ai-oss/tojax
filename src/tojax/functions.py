@@ -729,6 +729,278 @@ def adaptive_avg_pool2d(input, output_size):
     return avg_pool2d(input, kernel_size, stride, 0, 1, False, False)
 
 
+# =============================================================================
+# Interpolation / upsampling
+# =============================================================================
+# Faithful reimplementation of torch.nn.functional.interpolate. Interpolation is
+# separable across spatial dimensions, so each spatial axis is resized in turn
+# using per-output gather indices and combination weights. Indices/weights are
+# derived from the (static) spatial sizes with numpy to exactly reproduce
+# PyTorch's coordinate transforms for every mode and option.
+
+_INTERP_MODES = frozenset(
+    {"nearest", "nearest-exact", "linear", "bilinear", "trilinear", "bicubic", "area"}
+)
+_INTERP_LINEAR_MODES = frozenset({"linear", "bilinear", "trilinear"})
+_INTERP_ALIGN_MODES = _INTERP_LINEAR_MODES | {"bicubic"}
+# Modes restricted to a specific number of spatial dims.
+_INTERP_MODE_DIMS = {"linear": 1, "bilinear": 2, "bicubic": 2, "trilinear": 3}
+
+
+def _interp_pixel_scale(in_size, out_size, align_corners, scale_factor):
+    """Source-to-destination scale for a spatial axis (torch coordinate transform)."""
+    if align_corners:
+        if isinstance(out_size, int) and out_size <= 1:
+            return 0.0
+        return (in_size - 1) / (out_size - 1)
+    if scale_factor is not None and scale_factor > 0:
+        return 1.0 / scale_factor
+    return in_size / out_size
+
+
+def _interp_source_index(scale, dst, align_corners, cubic, xp):
+    """Map output coordinates ``dst`` to fractional source coordinates."""
+    if align_corners:
+        return scale * dst
+    src = scale * (dst + 0.5) - 0.5
+    return src if cubic else xp.maximum(src, 0.0)
+
+
+def _interp_cubic_coeffs(t, a):
+    """Cubic convolution coefficients for the 4 taps at offsets [-1, 0, 1, 2]."""
+
+    def c1(x):
+        return ((a + 2) * x - (a + 3)) * x * x + 1
+
+    def c2(x):
+        return ((a * x - 5 * a) * x + 8 * a) * x - 4 * a
+
+    return [c2(t + 1.0), c1(t), c1(1.0 - t), c2(2.0 - t)]
+
+
+def _interp_aa_filter(dist, mode):
+    """Antialiasing separable filter (triangle for bilinear, a=-0.5 cubic)."""
+    dist = np.abs(dist)
+    if mode == "bilinear":
+        return np.where(dist < 1.0, 1.0 - dist, 0.0)
+    a = -0.5
+    r1 = ((a + 2) * dist - (a + 3)) * dist * dist + 1
+    r2 = ((a * dist - 5 * a) * dist + 8 * a) * dist - 4 * a
+    return np.where(dist < 1.0, r1, np.where(dist < 2.0, r2, 0.0))
+
+
+def _interp_out_size(in_size, scale_factor):
+    """Output size for a spatial axis given ``scale_factor`` (torch uses floor).
+
+    For a symbolic input size only integer scale factors yield a representable
+    symbolic output dimension; fractional factors raise.
+    """
+    if isinstance(in_size, int):
+        return int(np.floor(in_size * scale_factor))
+    if float(scale_factor).is_integer():
+        return in_size * int(scale_factor)
+    raise NotImplementedError(
+        "interpolate with a symbolic input size requires an integer scale_factor "
+        "or an explicit `size`."
+    )
+
+
+def _interp_index_weights(
+    in_size, out_size, mode, align_corners, scale_factor, antialias, xp
+):
+    """Gather indices and combination weights for resizing one spatial axis.
+
+    Args:
+        in_size: Input size along the axis (int or symbolic dim).
+        out_size: Output size along the axis (int or symbolic dim).
+        mode: Interpolation mode.
+        align_corners: Whether corner pixels are aligned (linear/cubic only).
+        scale_factor: Scale factor passed to the coordinate transform, or None.
+        antialias: Whether to apply the antialiasing filter (bilinear/bicubic).
+        xp: Array module to build the arrays with. ``numpy`` bakes constant
+            indices/weights for static sizes; ``jax.numpy`` supports symbolic
+            sizes (fixed-tap modes only — not area/antialias).
+
+    Returns:
+        Tuple ``(indices, weights)`` of arrays with shape ``(out_size, k)``.
+        ``weights`` is None for the nearest modes, which reduce to a pure gather.
+    """
+    int_t = np.int64 if xp is np else jnp.int32
+    dst = xp.arange(out_size)
+    if mode in ("nearest", "nearest-exact"):
+        scale = _interp_pixel_scale(in_size, out_size, False, scale_factor)
+        coord = dst if mode == "nearest" else dst + 0.5
+        src = xp.minimum(xp.floor(coord * scale).astype(int_t), in_size - 1)
+        return src[:, None], None
+
+    scale = _interp_pixel_scale(in_size, out_size, align_corners, scale_factor)
+
+    # area and antialias have a per-output tap count that depends on the (down)
+    # sampling ratio, so their gather width must be a Python int — supported for
+    # static sizes only (xp is numpy); callers gate symbolic sizes out.
+    if antialias:  # bilinear / bicubic
+        interp_size = 2 if mode == "bilinear" else 4
+        support = interp_size * 0.5 * scale if scale >= 1.0 else interp_size * 0.5
+        inv = 1.0 / scale if scale >= 1.0 else 1.0
+        center = scale * (dst + 0.5)
+        xmin = np.maximum(np.floor(center - support + 0.5).astype(np.int64), 0)
+        xmax = np.minimum(np.floor(center + support + 0.5).astype(np.int64), in_size)
+        k = int((xmax - xmin).max())
+        idx = xmin[:, None] + np.arange(k)[None, :]
+        valid = idx < xmax[:, None]
+        w = _interp_aa_filter((idx - center[:, None] + 0.5) * inv, mode) * valid
+        w = w / w.sum(axis=1, keepdims=True)
+        return np.where(valid, idx, in_size - 1), w
+
+    if mode in _INTERP_LINEAR_MODES:
+        real = _interp_source_index(scale, dst, align_corners, cubic=False, xp=xp)
+        i0 = xp.clip(xp.floor(real).astype(int_t), 0, in_size - 1)
+        i1 = xp.where(i0 < in_size - 1, i0 + 1, i0)
+        lam1 = real - i0
+        return xp.stack([i0, i1], -1), xp.stack([1.0 - lam1, lam1], -1)
+
+    if mode == "bicubic":
+        real = _interp_source_index(scale, dst, align_corners, cubic=True, xp=xp)
+        i = xp.floor(real).astype(int_t)
+        coeffs = _interp_cubic_coeffs(real - i, -0.75)
+        indices = xp.stack([xp.clip(i + o, 0, in_size - 1) for o in (-1, 0, 1, 2)], -1)
+        return indices, xp.stack(coeffs, -1)
+
+    # area: adaptive average pooling over the corresponding source region.
+    starts = np.floor(dst * in_size / out_size).astype(np.int64)
+    ends = np.ceil((dst + 1) * in_size / out_size).astype(np.int64)
+    counts = ends - starts
+    k = int(counts.max())
+    idx = starts[:, None] + np.arange(k)[None, :]
+    valid = idx < ends[:, None]
+    return np.where(valid, idx, in_size - 1), valid / counts[:, None]
+
+
+def _interp_resize_axis(x, axis, indices, weights):
+    """Resize ``x`` along ``axis`` via per-tap gather-and-weighted-sum.
+
+    ``indices``/``weights`` have shape ``(out_size, k)``. Taps are accumulated
+    with ``k`` (statically known) 1-D gathers rather than a single 2-D gather
+    plus reduction — the latter miscompiles under JAX symbolic shapes.
+    """
+    if weights is None:  # nearest: pure gather, preserves dtype exactly
+        return jnp.take(x, indices[:, 0], axis=axis)
+    bshape = (1,) * axis + (weights.shape[0],) + (1,) * (x.ndim - 1 - axis)
+
+    def tap(j):
+        w = jnp.asarray(weights[:, j], dtype=x.dtype).reshape(bshape)
+        return jnp.take(x, indices[:, j], axis=axis) * w
+
+    out = tap(0)
+    for j in range(1, indices.shape[1]):
+        out = out + tap(j)
+    return out
+
+
+@translates(torch.nn.functional.interpolate)
+def interpolate(
+    input,
+    size=None,
+    scale_factor=None,
+    mode="nearest",
+    align_corners=None,
+    recompute_scale_factor=None,
+    antialias=False,
+):
+    """JAX implementation of PyTorch's ``interpolate`` / upsampling.
+
+    Args:
+        input: Tensor of shape ``(N, C, *spatial)`` with 1-3 spatial dims.
+        size: Output spatial size (int or per-dim tuple). Mutually exclusive
+            with ``scale_factor``.
+        scale_factor: Spatial multiplier (float or per-dim tuple).
+        mode: One of nearest, nearest-exact, linear, bilinear, bicubic,
+            trilinear, area.
+        align_corners: Corner-alignment for linear/bilinear/bicubic/trilinear.
+        recompute_scale_factor: If True, derive the interpolation scale from the
+            computed output size rather than from ``scale_factor``.
+        antialias: Apply an antialiasing filter (bilinear/bicubic only).
+
+    Returns:
+        The resized tensor of shape ``(N, C, *out_spatial)``.
+
+    Note:
+        Symbolic (``jax.export``) spatial sizes are supported for the fixed-tap
+        modes (nearest, nearest-exact, linear, bilinear, trilinear, bicubic)
+        when the output size is concrete or given by an integer ``scale_factor``.
+        The ``area`` mode and ``antialias`` need a per-output tap count derived
+        from the sampling ratio, so they require concrete spatial sizes.
+    """
+    spatial = input.ndim - 2
+    if spatial < 1:
+        raise ValueError("interpolate expects input with shape (N, C, *spatial).")
+    if mode not in _INTERP_MODES:
+        raise NotImplementedError(f"interpolate mode '{mode}' is not supported.")
+    if mode in _INTERP_MODE_DIMS and spatial != _INTERP_MODE_DIMS[mode]:
+        raise ValueError(
+            f"interpolate mode '{mode}' expects {_INTERP_MODE_DIMS[mode]} spatial "
+            f"dim(s), got {spatial}."
+        )
+    if align_corners is not None and mode not in _INTERP_ALIGN_MODES:
+        raise ValueError(
+            "align_corners can only be set for the linear, bilinear, bicubic and "
+            "trilinear modes."
+        )
+    if antialias and mode not in ("bilinear", "bicubic"):
+        raise ValueError("antialias is only supported for bilinear and bicubic modes.")
+    if (size is None) == (scale_factor is None):
+        raise ValueError("Exactly one of size or scale_factor must be set.")
+
+    align = bool(align_corners) if align_corners is not None else False
+
+    in_sizes = [input.shape[2 + i] for i in range(spatial)]
+    if size is not None:
+        out_sizes = list(size) if isinstance(size, (list, tuple)) else [size] * spatial
+        scale_factors = [None] * spatial
+    else:
+        sf = (
+            list(scale_factor)
+            if isinstance(scale_factor, (list, tuple))
+            else [scale_factor] * spatial
+        )
+        out_sizes = [_interp_out_size(in_sizes[i], sf[i]) for i in range(spatial)]
+        scale_factors = [None] * spatial if recompute_scale_factor else list(sf)
+    if len(out_sizes) != spatial or len(scale_factors) != spatial:
+        raise ValueError("size / scale_factor length must match the spatial dims.")
+
+    # Weighted modes need float arithmetic; promote integer inputs and restore.
+    orig_dtype = input.dtype
+    weighted = mode not in ("nearest", "nearest-exact")
+    if weighted and not jnp.issubdtype(input.dtype, jnp.floating):
+        input = input.astype(jnp.float32)
+
+    for i in range(spatial):
+        axis = 2 + i
+        # Static sizes use numpy (constant-folded, all modes). Symbolic sizes
+        # use jax.numpy, which supports only the fixed-tap modes.
+        concrete = isinstance(in_sizes[i], int) and isinstance(out_sizes[i], int)
+        if not concrete and (mode == "area" or antialias):
+            raise NotImplementedError(
+                "interpolate with symbolic shapes supports only the nearest, "
+                "nearest-exact, linear, bilinear, trilinear and bicubic modes "
+                "(not area or antialias)."
+            )
+        indices, weights = _interp_index_weights(
+            in_sizes[i],
+            out_sizes[i],
+            mode,
+            align,
+            scale_factors[i],
+            antialias,
+            np if concrete else jnp,
+        )
+        input = _interp_resize_axis(input, axis, indices, weights)
+
+    if weighted and not jnp.issubdtype(orig_dtype, jnp.floating):
+        input = jnp.round(input).astype(orig_dtype)
+    return input
+
+
 @translates(torch.nn.functional.conv2d)
 @translates(torch.conv2d)
 def conv2d(input, weight, bias, stride, padding, dilation, groups):
