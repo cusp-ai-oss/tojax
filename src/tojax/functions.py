@@ -1200,6 +1200,101 @@ def narrow(input, dim, start, length):
     return input[*index]
 
 
+def dot_product_attention(
+    query, key, value, bias=None, mask=None, *, scale=None, is_causal=False
+):
+    """Precision-preserving drop-in for ``jax.nn.dot_product_attention``.
+
+    For float32 queries this dispatches to ``jax.nn.dot_product_attention`` to
+    use its hardware-optimized kernels. For other dtypes it uses a custom
+    implementation whose softmax runs in the input dtype, since
+    ``jax.nn.dot_product_attention`` always carries the softmax out in fp32 and
+    would lose precision (e.g. for float64).
+
+    Grouped-query attention (fewer key/value heads than query heads) is
+    supported when the query head count is a multiple of the key/value head
+    count. Query rows whose keys are all masked out produce a zero output
+    (safe softmax), matching ``torch.nn.functional.scaled_dot_product_attention``.
+
+    Args:
+        query: Query array of shape ``(..., T, N, H)``.
+        key: Key array of shape ``(..., S, K, H)`` with ``N`` a multiple of ``K``.
+        value: Value array of shape ``(..., S, K, H)``.
+        bias: Optional additive bias broadcastable to ``(..., N, T, S)``.
+        mask: Optional boolean mask broadcastable to ``(..., N, T, S)`` where
+            ``True`` marks positions that take part in attention.
+        scale: Logit scale. Defaults to ``1 / sqrt(H)``.
+        is_causal: If ``True``, applies a causal (lower-triangular) mask.
+
+    Returns:
+        Attention output with the same shape as ``query``.
+    """
+    if query.dtype == jnp.float32:
+        out = jax.nn.dot_product_attention(
+            query, key, value, bias=bias, mask=mask, scale=scale, is_causal=is_causal
+        )
+    else:
+        head_dim = query.shape[-1]
+        scale = 1.0 / np.sqrt(head_dim) if scale is None else scale
+        n_q, n_kv = query.shape[-2], key.shape[-2]
+        if n_q != n_kv:
+            key = jnp.repeat(key, n_q // n_kv, axis=-2)
+            value = jnp.repeat(value, n_q // n_kv, axis=-2)
+        einsum = inherit_precision(jnp.einsum)
+        logits = einsum("...TNH,...SNH->...NTS", query, key)
+        logits = logits * jnp.asarray(scale, logits.dtype)
+        if bias is not None:
+            logits = logits + bias
+        if mask is not None or is_causal:
+            keep = jnp.ones(logits.shape, dtype=bool)
+            if mask is not None:
+                keep = keep & mask
+            if is_causal:
+                t, s = logits.shape[-2], logits.shape[-1]
+                keep = keep & jnp.tril(jnp.ones((t, s), dtype=bool))
+            neg = jnp.asarray(-0.7 * jnp.finfo(logits.dtype).max, logits.dtype)
+            logits = jnp.where(keep, logits, neg)
+        probs = jax.nn.softmax(logits, axis=-1)
+        out = einsum("...NTS,...SNH->...TNH", probs, value)
+
+    # Safe softmax: zero the output of query rows whose keys are all masked,
+    # which would otherwise be NaN (or uniform). is_causal alone never fully
+    # masks a row, so this only matters when a bias or mask is present.
+    if bias is not None or mask is not None:
+        t, s = query.shape[-3], key.shape[-3]
+        allowed = jnp.ones((t, s), dtype=bool)
+        if mask is not None:
+            allowed = allowed & mask
+        if bias is not None:
+            allowed = allowed & (bias != -jnp.inf)
+        if is_causal:
+            allowed = allowed & jnp.tril(jnp.ones((t, s), dtype=bool))
+        masked_rows = jnp.swapaxes(~jnp.any(allowed, axis=-1), -1, -2)[..., None]
+        out = jnp.where(masked_rows, jnp.zeros_like(out), out)
+    return out
+
+
+def _mha_canonical_mask(mask, dtype):
+    """Canonicalize a MultiheadAttention mask to an additive float mask.
+
+    Boolean masks are converted so ``True`` positions become ``-inf`` (masked
+    out) and ``False`` positions become ``0``; float masks are returned
+    unchanged and used as additive biases.
+
+    Args:
+        mask: Boolean or float mask, or ``None``.
+        dtype: Target float dtype for converted boolean masks.
+
+    Returns:
+        Additive float mask, or ``None`` if ``mask`` is ``None``.
+    """
+    if mask is None:
+        return None
+    if mask.dtype == jnp.bool_:
+        return jnp.where(mask, jnp.asarray(-jnp.inf, dtype), jnp.asarray(0.0, dtype))
+    return mask
+
+
 @translates(torch.nn.functional.multi_head_attention_forward)
 def multi_head_attention_forward(
     query: jax.Array,
@@ -1228,69 +1323,214 @@ def multi_head_attention_forward(
     average_attn_weights: bool = True,
     is_causal: bool = False,
 ):
-    assert in_proj_weight is not None, "in_proj_weight is not supported yet"
-    assert in_proj_bias is not None, "in_proj_bias is not supported yet"
-    assert bias_k is None, "bias_k is not supported yet"
-    assert bias_v is None, "bias_v is not supported yet"
-    assert not add_zero_attn, "add_zero_attn is not supported yet"
-    assert out_proj_bias is not None, "out_proj_bias is not supported yet"
-    assert key_padding_mask is None, "key_padding_mask is not supported yet"
-    assert not need_weights, "need_weights is not supported yet"
-    assert not use_separate_proj_weight, "use_separate_proj_weight is not supported yet"
-    assert q_proj_weight is None, "q_proj_weight is not supported yet"
-    assert k_proj_weight is None, "k_proj_weight is not supported yet"
-    assert v_proj_weight is None, "v_proj_weight is not supported yet"
-    assert static_k is None, "static_k is not supported yet"
-    assert static_v is None, "static_v is not supported yet"
-    assert average_attn_weights, "average_attn_weights is not supported yet"
+    """JAX implementation of PyTorch's ``multi_head_attention_forward``.
 
-    Q, K, V = query, key, value
-    # Add a dummy batch dimension
-    is_batched = False
-    if Q.ndim == 2:
-        Q = Q[:, None, :]
-    else:
-        is_batched = True
-    if K.ndim == 2:
-        K = K[:, None, :]
-    else:
-        is_batched = True
-    if V.ndim == 2:
-        V = V[:, None, :]
-    else:
-        is_batched = True
-    # TODO: inherit precision from torch
-    # For some asinine reason, the PyTorch calling signature is query (L, N, E), key (S, N, E), and value (S, N, E).
-    Q, K, V = jnp.swapaxes(Q, 0, 1), jnp.swapaxes(K, 0, 1), jnp.swapaxes(V, 0, 1)
+    Faithfully mirrors PyTorch semantics for query/key/value projection,
+    attention masking, and output projection. When ``need_weights`` is ``False``
+    the attention core is computed via :func:`dot_product_attention`; otherwise
+    it is computed explicitly so the attention weights can be returned.
 
-    w_q, w_k, w_v = jnp.split(in_proj_weight, 3)
-    b_q, b_k, b_v = jnp.split(in_proj_bias, 3)
-    mm_fn = inherit_precision(jnp.matmul)
-    Q1, K1, V1 = mm_fn(Q, w_q.T) + b_q, mm_fn(K, w_k.T) + b_k, mm_fn(V, w_v.T) + b_v
+    Args:
+        query: Query of shape ``(L, E)`` (unbatched) or ``(L, N, E)``.
+        key: Key of shape ``(S, E)`` or ``(S, N, E)``.
+        value: Value of shape ``(S, E)`` or ``(S, N, E)``.
+        embed_dim_to_check: Expected embedding dimension ``E``.
+        num_heads: Number of attention heads.
+        in_proj_weight: Packed ``(3E, E)`` input projection weight, or ``None``
+            when ``use_separate_proj_weight`` is set.
+        in_proj_bias: Packed ``(3E,)`` input projection bias, or ``None``.
+        bias_k: Optional ``(1, 1, E)`` bias appended to the key sequence.
+        bias_v: Optional ``(1, 1, E)`` bias appended to the value sequence.
+        add_zero_attn: If ``True``, append a zero key/value along the source dim.
+        dropout_p: Attention dropout probability; only ``0`` is supported.
+        out_proj_weight: Output projection weight of shape ``(E, E)``.
+        out_proj_bias: Optional output projection bias of shape ``(E,)``.
+        training: If ``False``, dropout is disabled.
+        key_padding_mask: Optional ``(N, S)`` (or ``(S,)`` unbatched) mask.
+        need_weights: If ``True``, also return the attention weights.
+        attn_mask: Optional 2D ``(L, S)`` or 3D ``(N*num_heads, L, S)`` mask.
+        use_separate_proj_weight: If ``True``, use ``q/k/v_proj_weight`` instead
+            of ``in_proj_weight``.
+        q_proj_weight: Query projection weight when using separate weights.
+        k_proj_weight: Key projection weight when using separate weights.
+        v_proj_weight: Value projection weight when using separate weights.
+        static_k: Optional precomputed key of shape ``(N*num_heads, S, E/num_heads)``.
+        static_v: Optional precomputed value of shape ``(N*num_heads, S, E/num_heads)``.
+        average_attn_weights: If ``True``, average returned weights over heads.
+        is_causal: If ``True``, apply a causal mask (requires ``attn_mask``).
 
-    Q = Q1.reshape(*Q.shape[:-1], num_heads, Q.shape[-1] // num_heads)
-    K = K1.reshape(*K.shape[:-1], num_heads, K.shape[-1] // num_heads)
-    V = V1.reshape(*V.shape[:-1], num_heads, V.shape[-1] // num_heads)
-    sdpa = jax.vmap(
-        scaled_dot_product_attention,
-        in_axes=(-2, -2, -2, None, None, None),
-        out_axes=-1,
-    )(Q, K, V, attn_mask, dropout_p, is_causal)
-    sdpa = sdpa.reshape(*sdpa.shape[:-2], -1)
-    out = mm_fn(sdpa, out_proj_weight.T) + out_proj_bias
+    Returns:
+        Tuple ``(attn_output, attn_output_weights)`` where the weights are
+        ``None`` when ``need_weights`` is ``False``.
+    """
+    assert dropout_p == 0.0 or not training, "Dropout is not supported."
+
+    is_batched = query.ndim == 3
     if not is_batched:
-        out = out[0]
+        query, key, value = query[:, None], key[:, None], value[:, None]
+        if key_padding_mask is not None:
+            key_padding_mask = key_padding_mask[None]
+
+    tgt_len, bsz, embed_dim = query.shape
+    dtype = query.dtype
+    assert embed_dim == embed_dim_to_check, (
+        f"was expecting embedding dimension of {embed_dim_to_check}, got {embed_dim}"
+    )
+    head_dim = embed_dim // num_heads
+    assert head_dim * num_heads == embed_dim, (
+        f"embed_dim {embed_dim} not divisible by num_heads {num_heads}"
+    )
+
+    key_padding_mask = _mha_canonical_mask(key_padding_mask, dtype)
+    if is_causal and attn_mask is None:
+        raise RuntimeError("Need attn_mask if specifying the is_causal hint.")
+    if is_causal and key_padding_mask is None and not need_weights:
+        attn_mask = None
     else:
-        out = jnp.swapaxes(out, 0, 1)
-    return out, None
+        attn_mask = _mha_canonical_mask(attn_mask, dtype)
+        if key_padding_mask is not None:
+            is_causal = False
+
+    # In-projection.
+    if in_proj_bias is None:
+        b_q = b_k = b_v = None
+    else:
+        b_q, b_k, b_v = jnp.split(in_proj_bias, 3)
+    if not use_separate_proj_weight:
+        w_q, w_k, w_v = jnp.split(in_proj_weight, 3)
+    else:
+        w_q, w_k, w_v = q_proj_weight, k_proj_weight, v_proj_weight
+    q = linear(query, w_q, b_q)
+    k = linear(key, w_k, b_k)
+    v = linear(value, w_v, b_v)
+
+    # Ensure attn_mask is at least 3D: (1, L, S) or (N*num_heads, L, S).
+    if attn_mask is not None and attn_mask.ndim == 2:
+        attn_mask = attn_mask[None]
+
+    # Append bias_k/bias_v along the source sequence dimension.
+    if bias_k is not None and bias_v is not None:
+        k = jnp.concatenate([k, jnp.tile(bias_k, (1, bsz, 1))], axis=0)
+        v = jnp.concatenate([v, jnp.tile(bias_v, (1, bsz, 1))], axis=0)
+        if attn_mask is not None:
+            attn_mask = jnp.pad(attn_mask, ((0, 0), (0, 0), (0, 1)))
+        if key_padding_mask is not None:
+            key_padding_mask = jnp.pad(key_padding_mask, ((0, 0), (0, 1)))
+
+    # Reshape to (bsz*num_heads, seq, head_dim).
+    q = q.reshape(tgt_len, bsz * num_heads, head_dim).swapaxes(0, 1)
+    if static_k is None:
+        k = k.reshape(k.shape[0], bsz * num_heads, head_dim).swapaxes(0, 1)
+    else:
+        k = static_k
+    if static_v is None:
+        v = v.reshape(v.shape[0], bsz * num_heads, head_dim).swapaxes(0, 1)
+    else:
+        v = static_v
+
+    # Append zero key/value for add_zero_attn.
+    if add_zero_attn:
+        zero_shape = (bsz * num_heads, 1, head_dim)
+        k = jnp.concatenate([k, jnp.zeros(zero_shape, k.dtype)], axis=1)
+        v = jnp.concatenate([v, jnp.zeros(zero_shape, v.dtype)], axis=1)
+        if attn_mask is not None:
+            attn_mask = jnp.pad(attn_mask, ((0, 0), (0, 0), (0, 1)))
+        if key_padding_mask is not None:
+            key_padding_mask = jnp.pad(key_padding_mask, ((0, 0), (0, 1)))
+
+    src_len = k.shape[1]
+
+    # Merge key_padding_mask into the additive attention mask.
+    if key_padding_mask is not None:
+        kpm = jnp.broadcast_to(
+            key_padding_mask.reshape(bsz, 1, 1, src_len),
+            (bsz, num_heads, 1, src_len),
+        ).reshape(bsz * num_heads, 1, src_len)
+        attn_mask = kpm if attn_mask is None else attn_mask + kpm
+
+    mm = inherit_precision(jnp.matmul)
+    if need_weights:
+        q_scaled = q * float(np.sqrt(1.0 / head_dim))
+        scores = mm(q_scaled, k.swapaxes(-2, -1))
+        if attn_mask is not None:
+            scores = scores + attn_mask
+        weights = jax.nn.softmax(scores, axis=-1)
+        attn_output = mm(weights, v).swapaxes(0, 1).reshape(tgt_len * bsz, embed_dim)
+        attn_output = linear(attn_output, out_proj_weight, out_proj_bias)
+        attn_output = attn_output.reshape(tgt_len, bsz, -1)
+        weights = weights.reshape(bsz, num_heads, tgt_len, src_len)
+        if average_attn_weights:
+            weights = weights.mean(axis=1)
+        if not is_batched:
+            attn_output, weights = attn_output[:, 0], weights[0]
+        return attn_output, weights
+
+    # need_weights is False: use the fused attention core.
+    if attn_mask is not None:
+        bias = (
+            attn_mask[None]
+            if attn_mask.shape[0] == 1
+            else attn_mask.reshape(bsz, num_heads, -1, src_len)
+        )
+    else:
+        bias = None
+    qh = q.reshape(bsz, num_heads, tgt_len, head_dim).swapaxes(1, 2)
+    kh = k.reshape(bsz, num_heads, src_len, head_dim).swapaxes(1, 2)
+    vh = v.reshape(bsz, num_heads, src_len, head_dim).swapaxes(1, 2)
+    attn_output = dot_product_attention(
+        qh, kh, value=vh, bias=bias, is_causal=is_causal and attn_mask is None
+    )
+    attn_output = attn_output.swapaxes(0, 1).reshape(tgt_len, bsz, -1)
+    attn_output = linear(attn_output, out_proj_weight, out_proj_bias)
+    if not is_batched:
+        attn_output = attn_output[:, 0]
+    return attn_output, None
 
 
 @translates(torch.nn.functional.scaled_dot_product_attention)
-def scaled_dot_product_attention(query, key, value, attn_mask, dropout_p, is_causal):
+def scaled_dot_product_attention(
+    query,
+    key,
+    value,
+    attn_mask=None,
+    dropout_p=0.0,
+    is_causal=False,
+    scale=None,
+    enable_gqa=False,
+):
+    """JAX implementation of PyTorch's ``scaled_dot_product_attention``.
+
+    Dispatches to :func:`dot_product_attention`, which preserves precision for
+    non-float32 dtypes. PyTorch's ``(..., num_heads, L, E)`` layout is converted
+    to the ``(..., L, num_heads, E)`` layout expected by that helper.
+
+    Args:
+        query: Query of shape ``(..., num_heads, L, E)``.
+        key: Key of shape ``(..., num_heads, S, E)``.
+        value: Value of shape ``(..., num_heads, S, E)``.
+        attn_mask: Optional boolean (``True`` attends) or additive float mask
+            broadcastable to ``(..., num_heads, L, S)``.
+        dropout_p: Dropout probability; only ``0`` is supported.
+        is_causal: If ``True``, applies a causal mask.
+        scale: Logit scale. Defaults to ``1 / sqrt(E)``.
+        enable_gqa: If ``True``, enables grouped-query attention.
+
+    Returns:
+        Attention output in the same layout as ``query``.
+    """
+    del enable_gqa  # Grouped-query attention is inferred from head counts.
     assert dropout_p == 0.0, "Dropout is not supported."
-    return jax.nn.dot_product_attention(
-        query, key, value, mask=attn_mask, is_causal=is_causal
+    q, k, v = (jnp.swapaxes(x, -3, -2) for x in (query, key, value))
+    bias = mask = None
+    if attn_mask is not None:
+        if attn_mask.dtype == jnp.bool_:
+            mask = attn_mask
+        else:
+            bias = attn_mask
+    out = dot_product_attention(
+        q, k, v, bias=bias, mask=mask, scale=scale, is_causal=is_causal
     )
+    return jnp.swapaxes(out, -3, -2)
 
 
 @translates(torch._C._linalg.linalg_norm)
