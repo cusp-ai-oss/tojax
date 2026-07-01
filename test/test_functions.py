@@ -7,6 +7,7 @@ import numpy.testing as npt
 import pytest
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from jax import export
 from pytest import fixture
 
@@ -2415,3 +2416,578 @@ class TestInterpolate:
             tojax(lambda t: nn.functional.interpolate(t, size=4, scale_factor=2.0))(
                 jnp.asarray(torch.randn(2, 3, 6))
             )
+
+
+def _mha_call(
+    query,
+    key,
+    value,
+    in_proj_weight,
+    in_proj_bias,
+    out_proj_weight,
+    out_proj_bias,
+    bias_k,
+    bias_v,
+    q_proj_weight,
+    k_proj_weight,
+    v_proj_weight,
+    static_k,
+    static_v,
+    key_padding_mask,
+    attn_mask,
+    *,
+    embed_dim,
+    num_heads,
+    add_zero_attn,
+    dropout_p,
+    training,
+    need_weights,
+    use_separate_proj_weight,
+    average_attn_weights,
+    is_causal,
+):
+    """Positional wrapper around F.multi_head_attention_forward for tojax."""
+    return F.multi_head_attention_forward(
+        query,
+        key,
+        value,
+        embed_dim,
+        num_heads,
+        in_proj_weight,
+        in_proj_bias,
+        bias_k,
+        bias_v,
+        add_zero_attn,
+        dropout_p,
+        out_proj_weight,
+        out_proj_bias,
+        training=training,
+        key_padding_mask=key_padding_mask,
+        need_weights=need_weights,
+        attn_mask=attn_mask,
+        use_separate_proj_weight=use_separate_proj_weight,
+        q_proj_weight=q_proj_weight,
+        k_proj_weight=k_proj_weight,
+        v_proj_weight=v_proj_weight,
+        static_k=static_k,
+        static_v=static_v,
+        average_attn_weights=average_attn_weights,
+        is_causal=is_causal,
+    )
+
+
+def _j(t):
+    return None if t is None else jnp.asarray(t.detach().cpu().numpy())
+
+
+class TestMultiHeadAttentionForward:
+    L, S, N, E, H = 4, 5, 2, 8, 2
+
+    def _weights(self, dtype, embed=E, kdim=None, vdim=None, bias=True):
+        kdim, vdim = kdim or embed, vdim or embed
+        opw = torch.randn(embed, embed, dtype=dtype)
+        opb = torch.randn(embed, dtype=dtype) if bias else None
+        ipb = torch.randn(3 * embed, dtype=dtype) if bias else None
+        if kdim == embed and vdim == embed:
+            return dict(
+                in_proj_weight=torch.randn(3 * embed, embed, dtype=dtype),
+                in_proj_bias=ipb,
+                out_proj_weight=opw,
+                out_proj_bias=opb,
+            )
+        return dict(
+            in_proj_weight=None,
+            in_proj_bias=ipb,
+            out_proj_weight=opw,
+            out_proj_bias=opb,
+            use_separate_proj_weight=True,
+            q_proj_weight=torch.randn(embed, embed, dtype=dtype),
+            k_proj_weight=torch.randn(embed, kdim, dtype=dtype),
+            v_proj_weight=torch.randn(embed, vdim, dtype=dtype),
+        )
+
+    def _compare(
+        self,
+        query,
+        key,
+        value,
+        num_heads,
+        *,
+        in_proj_weight=None,
+        in_proj_bias=None,
+        out_proj_weight,
+        out_proj_bias=None,
+        bias_k=None,
+        bias_v=None,
+        q_proj_weight=None,
+        k_proj_weight=None,
+        v_proj_weight=None,
+        static_k=None,
+        static_v=None,
+        key_padding_mask=None,
+        attn_mask=None,
+        add_zero_attn=False,
+        dropout_p=0.0,
+        training=True,
+        need_weights=True,
+        use_separate_proj_weight=False,
+        average_attn_weights=True,
+        is_causal=False,
+    ):
+        embed_dim = query.shape[-1]
+        out_t, w_t = F.multi_head_attention_forward(
+            query,
+            key,
+            value,
+            embed_dim,
+            num_heads,
+            in_proj_weight,
+            in_proj_bias,
+            bias_k,
+            bias_v,
+            add_zero_attn,
+            dropout_p,
+            out_proj_weight,
+            out_proj_bias,
+            training=training,
+            key_padding_mask=key_padding_mask,
+            need_weights=need_weights,
+            attn_mask=attn_mask,
+            use_separate_proj_weight=use_separate_proj_weight,
+            q_proj_weight=q_proj_weight,
+            k_proj_weight=k_proj_weight,
+            v_proj_weight=v_proj_weight,
+            static_k=static_k,
+            static_v=static_v,
+            average_attn_weights=average_attn_weights,
+            is_causal=is_causal,
+        )
+        out_j, w_j = tojax(_mha_call)(
+            _j(query),
+            _j(key),
+            _j(value),
+            _j(in_proj_weight),
+            _j(in_proj_bias),
+            _j(out_proj_weight),
+            _j(out_proj_bias),
+            _j(bias_k),
+            _j(bias_v),
+            _j(q_proj_weight),
+            _j(k_proj_weight),
+            _j(v_proj_weight),
+            _j(static_k),
+            _j(static_v),
+            _j(key_padding_mask),
+            _j(attn_mask),
+            embed_dim=embed_dim,
+            num_heads=num_heads,
+            add_zero_attn=add_zero_attn,
+            dropout_p=dropout_p,
+            training=training,
+            need_weights=need_weights,
+            use_separate_proj_weight=use_separate_proj_weight,
+            average_attn_weights=average_attn_weights,
+            is_causal=is_causal,
+        )
+        tol = 5e-4 if query.dtype == torch.float32 else 1e-6
+        npt.assert_allclose(
+            np.asarray(out_j), out_t.detach().numpy(), rtol=tol, atol=tol
+        )
+        if need_weights:
+            npt.assert_allclose(
+                np.asarray(w_j), w_t.detach().numpy(), rtol=tol, atol=tol
+            )
+        else:
+            assert w_j is None
+
+    def _qkv(self, dtype, batched=True, kdim=None, vdim=None):
+        L, S, N, E = self.L, self.S, self.N, self.E
+        if batched:
+            shape = lambda seq, d: (seq, N, d)  # noqa: E731
+        else:
+            shape = lambda seq, d: (seq, d)  # noqa: E731
+        return (
+            torch.randn(*shape(L, E), dtype=dtype),
+            torch.randn(*shape(S, kdim or E), dtype=dtype),
+            torch.randn(*shape(S, vdim or E), dtype=dtype),
+        )
+
+    @pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
+    @pytest.mark.parametrize("need_weights", [True, False])
+    @pytest.mark.parametrize("batched", [True, False])
+    def test_basic(self, dtype, need_weights, batched):
+        torch.manual_seed(0)
+        q, k, v = self._qkv(dtype, batched=batched)
+        self._compare(
+            q, k, v, self.H, need_weights=need_weights, **self._weights(dtype)
+        )
+
+    @pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
+    def test_no_in_proj_bias(self, dtype):
+        torch.manual_seed(0)
+        q, k, v = self._qkv(dtype)
+        self._compare(q, k, v, self.H, **self._weights(dtype, bias=False))
+
+    @pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
+    def test_no_out_proj_bias(self, dtype):
+        torch.manual_seed(0)
+        q, k, v = self._qkv(dtype)
+        w = self._weights(dtype)
+        w["out_proj_bias"] = None
+        self._compare(q, k, v, self.H, **w)
+
+    def test_average_attn_weights_false(self):
+        torch.manual_seed(0)
+        q, k, v = self._qkv(torch.float64)
+        self._compare(
+            q,
+            k,
+            v,
+            self.H,
+            need_weights=True,
+            average_attn_weights=False,
+            **self._weights(torch.float64),
+        )
+
+    @pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
+    @pytest.mark.parametrize("need_weights", [True, False])
+    @pytest.mark.parametrize("mask_dtype", [torch.bool, "float"])
+    def test_attn_mask_2d(self, dtype, need_weights, mask_dtype):
+        torch.manual_seed(0)
+        q, k, v = self._qkv(dtype)
+        if mask_dtype == torch.bool:
+            mask = torch.rand(self.L, self.S) > 0.5
+            mask[:, 0] = False
+        else:
+            mask = torch.randn(self.L, self.S, dtype=dtype)
+        self._compare(
+            q,
+            k,
+            v,
+            self.H,
+            need_weights=need_weights,
+            attn_mask=mask,
+            **self._weights(dtype),
+        )
+
+    @pytest.mark.parametrize("need_weights", [True, False])
+    def test_attn_mask_3d(self, need_weights):
+        torch.manual_seed(0)
+        q, k, v = self._qkv(torch.float64)
+        mask = torch.randn(self.N * self.H, self.L, self.S)
+        self._compare(
+            q,
+            k,
+            v,
+            self.H,
+            need_weights=need_weights,
+            attn_mask=mask,
+            **self._weights(torch.float64),
+        )
+
+    @pytest.mark.parametrize("need_weights", [True, False])
+    @pytest.mark.parametrize("mask_dtype", [torch.bool, "float"])
+    def test_key_padding_mask(self, need_weights, mask_dtype):
+        torch.manual_seed(0)
+        q, k, v = self._qkv(torch.float64)
+        if mask_dtype == torch.bool:
+            kpm = torch.rand(self.N, self.S) > 0.5
+            kpm[:, 0] = False
+        else:
+            kpm = torch.randn(self.N, self.S)
+        self._compare(
+            q,
+            k,
+            v,
+            self.H,
+            need_weights=need_weights,
+            key_padding_mask=kpm,
+            **self._weights(torch.float64),
+        )
+
+    @pytest.mark.parametrize("need_weights", [True, False])
+    def test_key_padding_and_attn_mask(self, need_weights):
+        torch.manual_seed(0)
+        q, k, v = self._qkv(torch.float64)
+        kpm = torch.rand(self.N, self.S) > 0.5
+        kpm[:, 0] = False
+        mask = torch.rand(self.L, self.S) > 0.5
+        mask[:, 0] = False
+        self._compare(
+            q,
+            k,
+            v,
+            self.H,
+            need_weights=need_weights,
+            key_padding_mask=kpm,
+            attn_mask=mask,
+            **self._weights(torch.float64),
+        )
+
+    @pytest.mark.parametrize("need_weights", [True, False])
+    def test_bias_kv(self, need_weights):
+        torch.manual_seed(0)
+        q, k, v = self._qkv(torch.float64)
+        self._compare(
+            q,
+            k,
+            v,
+            self.H,
+            need_weights=need_weights,
+            bias_k=torch.randn(1, 1, self.E),
+            bias_v=torch.randn(1, 1, self.E),
+            **self._weights(torch.float64),
+        )
+
+    @pytest.mark.parametrize("need_weights", [True, False])
+    def test_add_zero_attn(self, need_weights):
+        torch.manual_seed(0)
+        q, k, v = self._qkv(torch.float64)
+        self._compare(
+            q,
+            k,
+            v,
+            self.H,
+            need_weights=need_weights,
+            add_zero_attn=True,
+            **self._weights(torch.float64),
+        )
+
+    @pytest.mark.parametrize("need_weights", [True, False])
+    def test_separate_proj_weight(self, need_weights):
+        torch.manual_seed(0)
+        kdim, vdim = 6, 10
+        q, k, v = self._qkv(torch.float64, kdim=kdim, vdim=vdim)
+        self._compare(
+            q,
+            k,
+            v,
+            self.H,
+            need_weights=need_weights,
+            **self._weights(torch.float64, kdim=kdim, vdim=vdim),
+        )
+
+    @pytest.mark.parametrize("need_weights", [True, False])
+    def test_static_kv(self, need_weights):
+        torch.manual_seed(0)
+        q, k, v = self._qkv(torch.float64)
+        hd = self.E // self.H
+        static_k = torch.randn(self.N * self.H, self.S, hd)
+        static_v = torch.randn(self.N * self.H, self.S, hd)
+        self._compare(
+            q,
+            k,
+            v,
+            self.H,
+            need_weights=need_weights,
+            static_k=static_k,
+            static_v=static_v,
+            **self._weights(torch.float64),
+        )
+
+    @pytest.mark.parametrize("need_weights", [True, False])
+    def test_is_causal(self, need_weights):
+        torch.manual_seed(0)
+        # is_causal requires the caller to also pass the causal attn_mask hint.
+        mask = torch.triu(torch.ones(self.S, self.S, dtype=torch.bool), diagonal=1)
+        q = torch.randn(self.S, self.N, self.E)
+        k = torch.randn(self.S, self.N, self.E)
+        v = torch.randn(self.S, self.N, self.E)
+        self._compare(
+            q,
+            k,
+            v,
+            self.H,
+            need_weights=need_weights,
+            is_causal=True,
+            attn_mask=mask,
+            **self._weights(torch.float64),
+        )
+
+    def test_is_causal_without_mask_raises(self):
+        torch.manual_seed(0)
+        q, k, v = self._qkv(torch.float64)
+        w = self._weights(torch.float64)
+        with pytest.raises(RuntimeError):
+            tojax(_mha_call)(
+                _j(q),
+                _j(k),
+                _j(v),
+                _j(w["in_proj_weight"]),
+                _j(w["in_proj_bias"]),
+                _j(w["out_proj_weight"]),
+                _j(w["out_proj_bias"]),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                embed_dim=self.E,
+                num_heads=self.H,
+                add_zero_attn=False,
+                dropout_p=0.0,
+                training=True,
+                need_weights=False,
+                use_separate_proj_weight=False,
+                average_attn_weights=True,
+                is_causal=True,
+            )
+
+    def test_dropout_raises(self):
+        torch.manual_seed(0)
+        q, k, v = self._qkv(torch.float64)
+        w = self._weights(torch.float64)
+        with pytest.raises(AssertionError):
+            tojax(_mha_call)(
+                _j(q),
+                _j(k),
+                _j(v),
+                _j(w["in_proj_weight"]),
+                _j(w["in_proj_bias"]),
+                _j(w["out_proj_weight"]),
+                _j(w["out_proj_bias"]),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                embed_dim=self.E,
+                num_heads=self.H,
+                add_zero_attn=False,
+                dropout_p=0.5,
+                training=True,
+                need_weights=True,
+                use_separate_proj_weight=False,
+                average_attn_weights=True,
+                is_causal=False,
+            )
+
+    @pytest.mark.parametrize("batch_first", [False, True])
+    @pytest.mark.parametrize("need_weights", [True, False])
+    def test_module(self, batch_first, need_weights):
+        torch.manual_seed(0)
+        mha = nn.MultiheadAttention(self.E, self.H, batch_first=batch_first)
+        q = (
+            torch.randn(self.N, self.L, self.E)
+            if batch_first
+            else torch.randn(self.L, self.N, self.E)
+        )
+        out_t, w_t = mha(q, q, q, need_weights=need_weights)
+        out_j, w_j = tojax(mha)(_j(q), _j(q), _j(q), need_weights=need_weights)
+        npt.assert_allclose(
+            np.asarray(out_j), out_t.detach().numpy(), rtol=1e-6, atol=1e-6
+        )
+        if need_weights:
+            npt.assert_allclose(
+                np.asarray(w_j), w_t.detach().numpy(), rtol=1e-6, atol=1e-6
+            )
+        else:
+            assert w_j is None
+
+
+def _sdpa_call(query, key, value, attn_mask, *, is_causal, scale, enable_gqa):
+    """Wrapper around F.scaled_dot_product_attention for tojax."""
+    return F.scaled_dot_product_attention(
+        query,
+        key,
+        value,
+        attn_mask=attn_mask,
+        is_causal=is_causal,
+        scale=scale,
+        enable_gqa=enable_gqa,
+    )
+
+
+class TestScaledDotProductAttention:
+    B, Hq, Hkv, L, S, E = 2, 4, 2, 5, 6, 8
+
+    def _compare(
+        self,
+        query,
+        key,
+        value,
+        *,
+        attn_mask=None,
+        is_causal=False,
+        scale=None,
+        enable_gqa=False,
+    ):
+        out_t = F.scaled_dot_product_attention(
+            query,
+            key,
+            value,
+            attn_mask=attn_mask,
+            is_causal=is_causal,
+            scale=scale,
+            enable_gqa=enable_gqa,
+        )
+        out_j = tojax(_sdpa_call)(
+            _j(query),
+            _j(key),
+            _j(value),
+            _j(attn_mask),
+            is_causal=is_causal,
+            scale=scale,
+            enable_gqa=enable_gqa,
+        )
+        tol = 5e-4 if query.dtype == torch.float32 else 1e-6
+        npt.assert_allclose(
+            np.asarray(out_j), out_t.detach().numpy(), rtol=tol, atol=tol
+        )
+
+    def _qkv(self, dtype, heads_kv=None):
+        B, Hq, L, S, E = self.B, self.Hq, self.L, self.S, self.E
+        hkv = heads_kv or Hq
+        return (
+            torch.randn(B, Hq, L, E, dtype=dtype),
+            torch.randn(B, hkv, S, E, dtype=dtype),
+            torch.randn(B, hkv, S, E, dtype=dtype),
+        )
+
+    @pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
+    def test_basic(self, dtype):
+        torch.manual_seed(0)
+        self._compare(*self._qkv(dtype))
+
+    @pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
+    def test_scale(self, dtype):
+        torch.manual_seed(0)
+        self._compare(*self._qkv(dtype), scale=0.3)
+
+    def test_is_causal(self):
+        torch.manual_seed(0)
+        q = torch.randn(self.B, self.Hq, self.L, self.E)
+        k = torch.randn(self.B, self.Hq, self.L, self.E)
+        v = torch.randn(self.B, self.Hq, self.L, self.E)
+        self._compare(q, k, v, is_causal=True)
+
+    def test_bool_mask(self):
+        torch.manual_seed(0)
+        q, k, v = self._qkv(torch.float64)
+        m = torch.rand(self.B, self.Hq, self.L, self.S) > 0.5
+        m[..., 0] = True
+        self._compare(q, k, v, attn_mask=m)
+
+    def test_float_mask(self):
+        torch.manual_seed(0)
+        q, k, v = self._qkv(torch.float64)
+        self._compare(q, k, v, attn_mask=torch.randn(self.B, self.Hq, self.L, self.S))
+
+    def test_grouped_query_attention(self):
+        torch.manual_seed(0)
+        self._compare(*self._qkv(torch.float64, heads_kv=self.Hkv), enable_gqa=True)
+
+    def test_unbatched_3d(self):
+        torch.manual_seed(0)
+        q = torch.randn(self.Hq, self.L, self.E)
+        k = torch.randn(self.Hq, self.S, self.E)
+        v = torch.randn(self.Hq, self.S, self.E)
+        self._compare(q, k, v)
