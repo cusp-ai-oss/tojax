@@ -14,6 +14,8 @@ This module automatically registers PyTorch's immutable collections and script
 wrapper types as JAX pytrees to enable proper tree traversal and transformation.
 """
 
+from importlib.metadata import version
+
 import jax
 import jax._src.tree_util
 import torch
@@ -66,5 +68,5 @@ if torch.jit._script.OrderedDictWrapper not in jax._src.tree_util._registry:
     )
 
 
+__version__ = version("tojax")
 __all__ = ["tojax", "RNGMode", "ScatterMode"]
-__version__ = "0.1.1"
