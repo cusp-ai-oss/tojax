@@ -1,6 +1,6 @@
 [project]
 name = "tojax"
-version = "1.0.0"
+version = "1.0.1"
 description = "Effortlessly transform PyTorch functions to JAX"
 readme = "README.md"
 license = "Apache-2.0"
