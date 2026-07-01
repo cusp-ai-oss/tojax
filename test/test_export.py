@@ -374,3 +374,55 @@ def test_gradient_compatibility():
 
     # Test that the output dtype is appropriate for gradient computation
     assert exported.out_avals[0].dtype in [jnp.float32, jnp.float64]
+
+
+def test_multi_head_attention_symbolic_shapes():
+    embed_dim, num_heads = 8, 2
+
+    @tojax
+    def f(query, key, value, ipw, ipb, opw, opb):
+        out, _ = F.multi_head_attention_forward(
+            query,
+            key,
+            value,
+            embed_dim,
+            num_heads,
+            ipw,
+            ipb,
+            None,
+            None,
+            False,
+            0.0,
+            opw,
+            opb,
+            need_weights=False,
+        )
+        return out
+
+    tgt, src, batch = export.symbolic_shape("L, S, N")
+    q = jax.ShapeDtypeStruct((tgt, batch, embed_dim), jnp.float64)
+    k = jax.ShapeDtypeStruct((src, batch, embed_dim), jnp.float64)
+    v = jax.ShapeDtypeStruct((src, batch, embed_dim), jnp.float64)
+    ipw = jax.ShapeDtypeStruct((3 * embed_dim, embed_dim), jnp.float64)
+    ipb = jax.ShapeDtypeStruct((3 * embed_dim,), jnp.float64)
+    opw = jax.ShapeDtypeStruct((embed_dim, embed_dim), jnp.float64)
+    opb = jax.ShapeDtypeStruct((embed_dim,), jnp.float64)
+
+    exported = export.export(jax.jit(f))(q, k, v, ipw, ipb, opw, opb)
+    assert exported.out_avals[0].shape == (tgt, batch, embed_dim)
+
+
+def test_scaled_dot_product_attention_symbolic_shapes():
+    num_heads, head_dim = 2, 8
+
+    @tojax
+    def f(query, key, value):
+        return F.scaled_dot_product_attention(query, key, value)
+
+    batch, tgt, src = export.symbolic_shape("B, L, S")
+    q = jax.ShapeDtypeStruct((batch, num_heads, tgt, head_dim), jnp.float64)
+    k = jax.ShapeDtypeStruct((batch, num_heads, src, head_dim), jnp.float64)
+    v = jax.ShapeDtypeStruct((batch, num_heads, src, head_dim), jnp.float64)
+
+    exported = export.export(jax.jit(f))(q, k, v)
+    assert exported.out_avals[0].shape == (batch, num_heads, tgt, head_dim)
