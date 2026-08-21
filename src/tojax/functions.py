@@ -1818,7 +1818,7 @@ def _searchsorted_via_scan(sorted_arr, query, side="left"):
         jnp.zeros_like(query, dtype=dtype),
         jnp.full_like(query, sorted_arr.shape[0], dtype=dtype),
     )
-    carry, _ = jax.lax.scan(body_fun, init, (), length=32)
+    carry, _ = jax.lax.scan(body_fun, init, (), length=32, unroll=True)
     return carry[1]
 
 
