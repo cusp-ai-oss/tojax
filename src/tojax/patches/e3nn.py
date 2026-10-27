@@ -8,6 +8,7 @@ including specialized handling for spherical harmonics and tensor products
 that are core to equivariant neural networks.
 """
 
+import functools
 import os
 
 # Required by e3nn
@@ -68,6 +69,24 @@ try:
     # Store original spherical harmonics implementation
     _og_sph_harm = e3nn.o3._spherical_harmonics._spherical_harmonics
 
+    def _raw_normalization(raw) -> str:
+        """The normalization of e3nn's internal ``_spherical_harmonics``.
+
+        Up to e3nn 0.4 it returns "norm" (each degree has unit norm) and ``SphericalHarmonics``
+        rescales for "component"; from e3nn 0.5 it returns "component" (degree l has norm
+        sqrt(2l + 1)) and ``SphericalHarmonics`` rescales for "norm". Read from the degree-1 block
+        of a unit vector rather than from the version string.
+        """
+        zero, one = torch.zeros(1), torch.ones(1)
+        degree_1 = raw(1, zero, zero, one)[..., 1:4]
+        return (
+            "component" if float(torch.linalg.vector_norm(degree_1)) > 1.5 else "norm"
+        )
+
+    @functools.cache
+    def _sph_harm_normalization() -> str:
+        return _raw_normalization(_og_sph_harm)
+
     def _spherical_harmonics[T: torch.Tensor | TensorWrapper](
         lmax: int, x: T, y: T, z: T
     ) -> T:
@@ -91,7 +110,7 @@ try:
         result = e3nn_jax._src.spherical_harmonics._jited_spherical_harmonics(
             tuple(range(lmax + 1)),
             jnp.stack((x, y, z), axis=-1),
-            normalization="norm",
+            normalization=_sph_harm_normalization(),
             algorithm=("recursive", "dense", "custom_jvp"),
         )
         result = jax.numpy.concatenate(result, axis=-1)
