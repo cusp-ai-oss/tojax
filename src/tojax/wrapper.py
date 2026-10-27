@@ -22,7 +22,7 @@ import torch
 from jax import export
 
 from tojax.dtype import jax_dtype, torch_dtype
-from tojax.scatter import get_scatter_mode
+from tojax.scatter import get_scatter_mode, scatter_along_dim
 from tojax.utils import get_caller
 
 # fmt: off
@@ -596,32 +596,16 @@ class TensorWrapper(TojaxDispatchable):
 
     def scatter(self, dim, index, src, *, reduce=None):
         """Scatter src values into self at indices specified by index along dim."""
-        index = to_jax_compatible(index)
-        src = to_jax_compatible(src)
-        data = self.data
-        ndim = data.ndim
-
-        # Build index arrays for each dimension
-        indices = []
-        for d in range(ndim):
-            if d == dim:
-                indices.append(index)
-            else:
-                shape = [1] * ndim
-                shape[d] = index.shape[d]
-                idx = jnp.broadcast_to(
-                    jnp.arange(index.shape[d]).reshape(shape), index.shape
-                )
-                indices.append(idx)
-
-        if reduce is None:
-            data = data.at[tuple(indices)].set(src, mode=get_scatter_mode())
-        elif reduce == "add":
-            data = data.at[tuple(indices)].add(src, mode=get_scatter_mode())
-        elif reduce == "multiply":
-            data = data.at[tuple(indices)].multiply(src, mode=get_scatter_mode())
-        else:
+        ops = {None: "set", "add": "add", "multiply": "multiply"}
+        if reduce not in ops:
             raise ValueError(f"Unsupported reduce mode: {reduce}")
+        data = scatter_along_dim(
+            self.data,
+            dim,
+            to_jax_compatible(index),
+            to_jax_compatible(src),
+            ops[reduce],
+        )
         return TensorWrapper(data)
 
     def scatter_(self, dim, index, src, *, reduce=None):
