@@ -30,7 +30,7 @@ import torch
 from jax import export
 
 from tojax.rng import RNGContext
-from tojax.scatter import get_scatter_mode
+from tojax.scatter import get_scatter_mode, scatter_along_dim
 from tojax.wrapper import TensorWrapper, expand, unwrap, wrap
 
 # Global registry mapping PyTorch functions to their JAX equivalents
@@ -1545,10 +1545,7 @@ def linalg_norm(input, ord=None, dim=None, keepdim=False, *, out=None, dtype=Non
 
 @translates(torch.scatter_add)
 def scatter_add(input, dim, index, src):
-    idx_l = jnp.meshgrid(*[jnp.arange(s) for s in index.shape][::-1])
-    idx_l = [i.ravel() for i in idx_l[::-1]]
-    idx_l[dim] = index.ravel()
-    return input.at[*idx_l].add(src.ravel(), mode=get_scatter_mode())
+    return scatter_along_dim(input, dim, index, src, "add")
 
 
 @translates(torch.index_add)
@@ -1671,71 +1668,33 @@ def bucketize(input, boundaries, *, out_int32=False, right=False, out=None):
 
 @translates(torch.scatter_reduce)
 def scatter_reduce(input, dim, index, src, reduce, *, include_self=True):
-    ndim = input.ndim
-
-    # Build index arrays for each dimension
-    indices = []
-    for d in range(ndim):
-        if d == dim:
-            indices.append(index)
-        else:
-            shape = [1] * ndim
-            shape[d] = index.shape[d]
-            idx = jnp.broadcast_to(
-                jnp.arange(index.shape[d]).reshape(shape), index.shape
-            )
-            indices.append(idx)
-    indices = tuple(indices)
-
+    if reduce not in ("sum", "prod", "amax", "amin", "mean"):
+        raise ValueError(f"Unsupported reduce mode: {reduce}")
+    op = {
+        "sum": "add",
+        "mean": "add",
+        "prod": "multiply",
+        "amax": "max",
+        "amin": "min",
+    }[reduce]
     if include_self:
-        # Standard case: include input values in reduction
-        if reduce == "sum":
-            return input.at[indices].add(src, mode=get_scatter_mode())
-        elif reduce == "prod":
-            return input.at[indices].multiply(src, mode=get_scatter_mode())
-        elif reduce == "amax":
-            return input.at[indices].max(src, mode=get_scatter_mode())
-        elif reduce == "amin":
-            return input.at[indices].min(src, mode=get_scatter_mode())
-        elif reduce == "mean":
-            sum_result = input.at[indices].add(src, mode=get_scatter_mode())
-            counts = jnp.ones_like(input)
-            counts = counts.at[indices].add(jnp.ones_like(src), mode=get_scatter_mode())
-            return sum_result / counts
-        else:
-            raise ValueError(f"Unsupported reduce mode: {reduce}")
+        start = input
     else:
-        # include_self=False: only reduce src values at touched indices,
-        # keep original input at untouched indices
-        # Track which indices are touched
-        touched = jnp.zeros(input.shape, dtype=jnp.bool_)
-        touched = touched.at[indices].set(True)
-
-        # Get identity value for reduce operation
-        if reduce == "sum":
-            identity = jnp.zeros_like(input)
-            reduced = identity.at[indices].add(src, mode=get_scatter_mode())
-        elif reduce == "prod":
-            identity = jnp.ones_like(input)
-            reduced = identity.at[indices].multiply(src, mode=get_scatter_mode())
-        elif reduce == "amax":
-            identity = jnp.full_like(input, -jnp.inf)
-            reduced = identity.at[indices].max(src, mode=get_scatter_mode())
-        elif reduce == "amin":
-            identity = jnp.full_like(input, jnp.inf)
-            reduced = identity.at[indices].min(src, mode=get_scatter_mode())
-        elif reduce == "mean":
-            identity = jnp.zeros_like(input)
-            sum_result = identity.at[indices].add(src, mode=get_scatter_mode())
-            counts = jnp.zeros_like(input)
-            counts = counts.at[indices].add(jnp.ones_like(src), mode=get_scatter_mode())
-            # Avoid division by zero at untouched indices
-            reduced = sum_result / jnp.maximum(counts, 1)
-        else:
-            raise ValueError(f"Unsupported reduce mode: {reduce}")
-
-        # Use reduced values where touched, original input elsewhere
-        return jnp.where(touched, reduced, input)
+        # only src reduces at the touched positions; input stays elsewhere
+        identity = {"add": 0, "multiply": 1, "max": -jnp.inf, "min": jnp.inf}[op]
+        start = jnp.full_like(input, identity)
+    reduced = scatter_along_dim(start, dim, index, src, op)
+    if reduce == "mean":
+        counts = scatter_along_dim(
+            jnp.full_like(input, 1 if include_self else 0), dim, index, 1, "add"
+        )
+        reduced = reduced / jnp.maximum(counts, 1)
+    if include_self:
+        return reduced
+    touched = scatter_along_dim(
+        jnp.zeros(input.shape, dtype=jnp.bool_), dim, index, True, "set"
+    )
+    return jnp.where(touched, reduced, input)
 
 
 @translates(torch.repeat_interleave)
