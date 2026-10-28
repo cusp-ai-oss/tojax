@@ -6,6 +6,7 @@ import numpy as np
 import numpy.testing as npt
 import pytest
 import torch
+
 from tojax.tojax import tojax  # imports the e3nn patch, which sets up e3nn's import
 
 pytest.importorskip("e3nn_jax")
