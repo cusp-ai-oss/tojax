@@ -44,6 +44,10 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.sdist]
 include = ["/src", "/LICENSE", "/README.md", "/pyproject.toml"]
 
+[tool.uv]
+# mace-torch pins e3nn==0.4.4 but runs on 0.5.1; test against the e3nn current installs have
+override-dependencies = ["e3nn==0.5.1"]
+
 [tool.uv.sources]
 mace-torch = { git = "https://github.com/n-gao/mace.git", branch = "ng/remove_cast" }
 
