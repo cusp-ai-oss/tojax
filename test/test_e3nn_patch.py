@@ -6,7 +6,6 @@ import numpy as np
 import numpy.testing as npt
 import pytest
 import torch
-
 from tojax.tojax import tojax  # imports the e3nn patch, which sets up e3nn's import
 
 pytest.importorskip("e3nn_jax")
@@ -22,7 +21,9 @@ torch.set_default_dtype(torch.float64)
 def test_spherical_harmonics_match_e3nn(normalization, normalize):
     """The patched spherical harmonics against e3nn's own, for every normalization."""
     sh = e3nn_o3.SphericalHarmonics(
-        e3nn_o3.Irreps.spherical_harmonics(3), normalize=normalize, normalization=normalization
+        e3nn_o3.Irreps.spherical_harmonics(3),
+        normalize=normalize,
+        normalization=normalization,
     )
     vectors = torch.randn(10, 3, generator=torch.Generator().manual_seed(0))
     expected = sh(vectors).numpy()
